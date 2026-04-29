@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSlider,
     QToolButton,
     QVBoxLayout,
 )
@@ -143,20 +144,49 @@ class DoubleSpinBoxSettingCard(SettingCard):
         self.spinBox.setAccelerated(True)
         self.spinBox.setStepType(QAbstractSpinBox.AdaptiveDecimalStepType)
 
+        # 创建滑块（小数通过缩放到整数处理）
+        self._sliderScale = 10**decimals
+        self.slider = QSlider(Qt.Horizontal, self)
+        self.slider.setRange(int(minimum * self._sliderScale), int(maximum * self._sliderScale))
+        self.slider.setSingleStep(max(1, int(self.spinBox.singleStep() * self._sliderScale)))
+        self.slider.setPageStep(max(1, int((self.spinBox.singleStep() * 5) * self._sliderScale)))
+        # Держим слайдер компактным, чтобы он не вылезал за границы левой панели
+        self.slider.setFixedWidth(120)
+
+        self.valueLayout = QVBoxLayout()
+        self.valueLayout.setSpacing(6)
+        self.valueLayout.setContentsMargins(0, 0, 0, 0)
+        self.valueLayout.addWidget(self.spinBox, 0, Qt.AlignRight)
+        self.valueLayout.addWidget(self.slider, 0, Qt.AlignRight)
+
         # 添加到布局
-        self.hBoxLayout.addWidget(self.spinBox, 0, Qt.AlignRight)
+        self.hBoxLayout.addLayout(self.valueLayout, 0)
         self.hBoxLayout.addSpacing(8)
 
         # 设置初始值和连接信号
         self.spinBox.valueChanged.connect(self.__onValueChanged)
+        self.slider.valueChanged.connect(self.__onSliderChanged)
 
     def __onValueChanged(self, value: float):
         """数值改变时的槽函数"""
-        self.setValue(value)
+        slider_value = int(round(value * self._sliderScale))
+        if self.slider.value() != slider_value:
+            self.slider.blockSignals(True)
+            self.slider.setValue(slider_value)
+            self.slider.blockSignals(False)
         self.valueChanged.emit(value)
+
+    def __onSliderChanged(self, slider_value: int):
+        value = slider_value / self._sliderScale
+        if self.spinBox.value() != value:
+            self.spinBox.setValue(value)
 
     def setValue(self, value: float):
         """设置数值"""
+        slider_value = int(round(value * self._sliderScale))
+        self.slider.blockSignals(True)
+        self.slider.setValue(slider_value)
+        self.slider.blockSignals(False)
         self.spinBox.setValue(value)
 
 
@@ -184,20 +214,45 @@ class SpinBoxSettingCard(SettingCard):
         self.spinBox.setAccelerated(True)
         self.spinBox.setStepType(QAbstractSpinBox.AdaptiveDecimalStepType)
 
+        # 创建滑块
+        self.slider = QSlider(Qt.Horizontal, self)
+        self.slider.setRange(minimum, maximum)
+        self.slider.setSingleStep(max(1, self.spinBox.singleStep()))
+        self.slider.setPageStep(max(1, self.spinBox.singleStep() * 5))
+        # Держим слайдер компактным, чтобы он не вылезал за границы левой панели
+        self.slider.setFixedWidth(120)
+
+        self.valueLayout = QVBoxLayout()
+        self.valueLayout.setSpacing(6)
+        self.valueLayout.setContentsMargins(0, 0, 0, 0)
+        self.valueLayout.addWidget(self.spinBox, 0, Qt.AlignRight)
+        self.valueLayout.addWidget(self.slider, 0, Qt.AlignRight)
+
         # 添加到布局
-        self.hBoxLayout.addWidget(self.spinBox, 0, Qt.AlignRight)
+        self.hBoxLayout.addLayout(self.valueLayout, 0)
         self.hBoxLayout.addSpacing(8)
 
         # 设置初始值和连接信号
         self.spinBox.valueChanged.connect(self.__onValueChanged)
+        self.slider.valueChanged.connect(self.__onSliderChanged)
 
     def __onValueChanged(self, value: int):
         """数值改变时的槽函数"""
-        self.setValue(value)
+        if self.slider.value() != value:
+            self.slider.blockSignals(True)
+            self.slider.setValue(value)
+            self.slider.blockSignals(False)
         self.valueChanged.emit(value)
+
+    def __onSliderChanged(self, value: int):
+        if self.spinBox.value() != value:
+            self.spinBox.setValue(value)
 
     def setValue(self, value: int):
         """设置数值"""
+        self.slider.blockSignals(True)
+        self.slider.setValue(value)
+        self.slider.blockSignals(False)
         self.spinBox.setValue(value)
 
 
