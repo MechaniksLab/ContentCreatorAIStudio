@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1671,30 +1672,87 @@ class AutoShortsInterface(QWidget):
 
     @staticmethod
     def _probe_video_duration_s(video_path: str) -> int:
-        try:
-            p = subprocess.run(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    video_path,
-                ],
+        """Возвращает длительность медиа в секундах.
+
+        В некоторых окружениях ffprobe может не вернуть format=duration
+        (или вернуть пустое значение), из-за чего UI «падает» в 1 секунду.
+        Поэтому используем несколько стратегий чтения длительности.
+        """
+
+        def _safe_int_seconds(value) -> int:
+            try:
+                if value is None:
+                    return 0
+                raw = str(value).strip().replace(",", ".")
+                if not raw:
+                    return 0
+                # используем ceil-подобное поведение через +0.999..., чтобы
+                # не превращать 1.9с в 1с и не «ломать» нижнюю границу диапазона
+                sec = int(float(raw) + 0.999)
+                return max(1, sec)
+            except Exception:
+                return 0
+
+        def _run_ffprobe(args: List[str]) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["ffprobe", "-v", "error", *args, video_path],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=(
-                    subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-                ),
+                creationflags=(subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
             )
+
+        try:
+            # 1) Базовый путь: format=duration
+            p = _run_ffprobe([
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
             if p.returncode == 0:
-                raw = (p.stdout or "").strip().splitlines()
-                if raw:
-                    return max(1, int(float(raw[0])))
+                lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+                if lines:
+                    v = _safe_int_seconds(lines[0])
+                    if v > 0:
+                        return v
+
+            # 2) Fallback: stream=duration (полезно для отдельных контейнеров)
+            p = _run_ffprobe([
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            if p.returncode == 0:
+                lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+                if lines:
+                    v = _safe_int_seconds(lines[0])
+                    if v > 0:
+                        return v
+
+            # 3) Последний fallback: ffmpeg -i ... парсим строку Duration: HH:MM:SS.xx
+            p = subprocess.run(
+                ["ffmpeg", "-i", video_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=(subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
+            )
+            probe_text = f"{p.stdout or ''}\n{p.stderr or ''}"
+            m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:[\.,]\d+)?)", probe_text)
+            if m:
+                h = int(m.group(1))
+                mm = int(m.group(2))
+                ss = float(m.group(3).replace(",", "."))
+                total = h * 3600 + mm * 60 + ss
+                v = _safe_int_seconds(total)
+                if v > 0:
+                    return v
         except Exception:
             pass
         return 1
