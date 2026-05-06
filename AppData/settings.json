@@ -95,7 +95,7 @@
     "SubtitleStyle": {
         "AntiFlicker": true,
         "AutoContrast": false,
-        "Effect": "zoom_in",
+        "Effect": "none",
         "EffectDuration": 290,
         "EffectIntensity": 130,
         "GradientColor1": "#ff5555",

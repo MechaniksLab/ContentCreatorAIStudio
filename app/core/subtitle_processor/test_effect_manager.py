@@ -100,6 +100,59 @@ def test_effect_registry_has_no_duplicates():
     assert dups["values"] == []
 
 
+def test_new_motion_effects_generate_valid_ass_tags():
+    text = "Bounce"
+    common = dict(
+        text=text,
+        start_ms=0,
+        end_ms=1800,
+        effect_duration_ms=600,
+        effect_intensity=1.2,
+        motion_direction="up",
+        motion_amplitude=1.0,
+        motion_easing="ease_out",
+        motion_jitter=0.2,
+        play_res_x=1280,
+        play_res_y=720,
+    )
+
+    spring = EffectManager.apply_ass_effect(
+        effect_type=SubtitleEffect.BOUNCE_SPRING.value,
+        **common,
+    )
+    assert "\\t(" in spring and "\\pos(" in spring
+
+    elastic = EffectManager.apply_ass_effect(
+        effect_type=SubtitleEffect.ELASTIC_POP.value,
+        **common,
+    )
+    assert "\\fscx" in elastic and "\\t(" in elastic
+
+    whip = EffectManager.apply_ass_effect(
+        effect_type=SubtitleEffect.WHIP_SLIDE.value,
+        **common,
+    )
+    assert "\\pos(" in whip and "\\t(" in whip
+
+    flip = EffectManager.apply_ass_effect(
+        effect_type=SubtitleEffect.FLIP_IN.value,
+        **common,
+    )
+    assert "\\frx" in flip and "\\fry" in flip and "\\t(" in flip
+
+    rubber = EffectManager.apply_ass_effect(
+        effect_type=SubtitleEffect.RUBBER_BAND.value,
+        **common,
+    )
+    assert "\\fscx" in rubber and "\\fscy" in rubber and "\\t(" in rubber
+
+    stomp = EffectManager.apply_ass_effect(
+        effect_type=SubtitleEffect.STOMP.value,
+        **common,
+    )
+    assert "\\pos(" in stomp and "\\fscx" in stomp and "\\fscy" in stomp
+
+
 def test_word_timestamp_mode_disables_synthetic_karaoke_k_tags():
     result = EffectManager.apply_ass_effect(
         text="hello",

@@ -29,6 +29,22 @@ class SubtitleEffect(str, Enum):
     SLIDE_LEFT = "slide_left"
     POP_ROTATE = "pop_rotate"
     SHAKE = "shake"
+    BOUNCE_SPRING = "bounce_spring"
+    ELASTIC_POP = "elastic_pop"
+    WHIP_SLIDE = "whip_slide"
+    FLIP_IN = "flip_in"
+    RUBBER_BAND = "rubber_band"
+    STOMP = "stomp"
+    BLAST_IN = "blast_in"
+    HELIX_SPIN = "helix_spin"
+    VORTEX_IN = "vortex_in"
+    LASER_REVEAL = "laser_reveal"
+    SIDESTEP_POP = "sidestep_pop"
+    COMET_SWEEP = "comet_sweep"
+    PIXEL_POP = "pixel_pop"
+    COLOR_STROBE = "color_strobe"
+    GHOST_TRAIL = "ghost_trail"
+    PRISM_FLASH = "prism_flash"
     NEON_FLICKER = "neon_flicker"
     WORD_HIGHLIGHT = "word_highlight"
 
@@ -62,6 +78,22 @@ class EffectManager:
         ("Скольжение слева", SubtitleEffect.SLIDE_LEFT.value, "motion"),
         ("Поп + поворот", SubtitleEffect.POP_ROTATE.value, "motion"),
         ("Дрожание", SubtitleEffect.SHAKE.value, "motion"),
+        ("Пружинный отскок", SubtitleEffect.BOUNCE_SPRING.value, "motion"),
+        ("Эластичный поп", SubtitleEffect.ELASTIC_POP.value, "motion"),
+        ("Хлыст-скольжение", SubtitleEffect.WHIP_SLIDE.value, "motion"),
+        ("Флип-вход", SubtitleEffect.FLIP_IN.value, "motion"),
+        ("Резиновый текст", SubtitleEffect.RUBBER_BAND.value, "motion"),
+        ("Удар о землю", SubtitleEffect.STOMP.value, "motion"),
+        ("Взрывной вход", SubtitleEffect.BLAST_IN.value, "motion"),
+        ("Спираль", SubtitleEffect.HELIX_SPIN.value, "motion"),
+        ("Вихрь", SubtitleEffect.VORTEX_IN.value, "motion"),
+        ("Лазерный прояв", SubtitleEffect.LASER_REVEAL.value, "style"),
+        ("Боковой рывок", SubtitleEffect.SIDESTEP_POP.value, "motion"),
+        ("Кометный пролёт", SubtitleEffect.COMET_SWEEP.value, "motion"),
+        ("Пиксельный поп", SubtitleEffect.PIXEL_POP.value, "style"),
+        ("Цветовой строб", SubtitleEffect.COLOR_STROBE.value, "color"),
+        ("Призрачный шлейф", SubtitleEffect.GHOST_TRAIL.value, "motion"),
+        ("Призма-вспышка", SubtitleEffect.PRISM_FLASH.value, "color"),
         ("Неоновое мерцание", SubtitleEffect.NEON_FLICKER.value, "style"),
         ("Глитч", SubtitleEffect.GLITCH.value, "style"),
         ("Печатная машинка", SubtitleEffect.TYPEWRITER.value, "style"),
@@ -322,6 +354,32 @@ class EffectManager:
             SubtitleEffect.SLIDE_LEFT.value,
             SubtitleEffect.SHAKE.value,
             SubtitleEffect.ZOOM_IN.value,
+            SubtitleEffect.BOUNCE_SPRING.value,
+            SubtitleEffect.ELASTIC_POP.value,
+            SubtitleEffect.WHIP_SLIDE.value,
+            SubtitleEffect.FLIP_IN.value,
+            SubtitleEffect.RUBBER_BAND.value,
+            SubtitleEffect.STOMP.value,
+            SubtitleEffect.BLAST_IN.value,
+            SubtitleEffect.HELIX_SPIN.value,
+            SubtitleEffect.VORTEX_IN.value,
+            SubtitleEffect.SIDESTEP_POP.value,
+            SubtitleEffect.COMET_SWEEP.value,
+            SubtitleEffect.GHOST_TRAIL.value,
+        }
+
+    @staticmethod
+    def get_effect_category_options() -> Dict[str, str]:
+        """Опции категорий эффектов для UI: {label: category_key}."""
+        return {
+            "Все типы": "all",
+            "Базовые": "basic",
+            "Появление/затухание": "fade",
+            "Движение": "motion",
+            "Акцент": "emphasis",
+            "Цвет": "color",
+            "Стиль": "style",
+            "Караоке": "karaoke",
         }
 
     @staticmethod
@@ -733,14 +791,227 @@ class EffectManager:
 
         if effect_type == SubtitleEffect.SHAKE.value:
             shake_amp = max(2, int(6 * intensity * amp))
-            t1 = min(effect_duration_ms // 3, duration)
-            t2 = min((effect_duration_ms * 2) // 3, duration)
+            t_end = min(effect_duration_ms, duration)
+            # Для ASS безопаснее использовать move (pos внутри \t поддерживается нестабильно).
+            x1 = base_x - shake_amp + j
+            y1 = base_y + shake_amp
+            x2 = base_x + shake_amp + j
+            y2 = base_y - shake_amp
+            return f"{{\\move({x1},{y1},{x2},{y2},0,{t_end})}}{processed_text}"
+
+        if effect_type == SubtitleEffect.BOUNCE_SPRING.value:
+            jump = max(10, int(45 * intensity * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, jump)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(40, effect_duration_ms // 4), duration)
+            t2 = min(max(t1 + 40, effect_duration_ms // 2), duration)
+            t3 = min(max(t2 + 40, (effect_duration_ms * 3) // 4), duration)
+            t4 = min(effect_duration_ms, duration)
+            over = max(3, int(jump * 0.22))
+            settle = max(2, int(jump * 0.12))
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y-over},0,{t1})"
+                f"\\t(0,{t1},{accel:.2f},\\fscx112\\fscy88)"
+                f"\\t({t1},{t2},\\fscx92\\fscy108)"
+                f"\\t({t2},{t3},\\fscx106\\fscy94)"
+                f"\\t({t3},{t4},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.ELASTIC_POP.value:
+            start_scale = max(35, int(100 - 52 * intensity))
+            over_scale = min(185, int(110 + 22 * intensity))
+            under_scale = max(84, int(100 - 10 * intensity))
+            t1 = min(max(40, effect_duration_ms // 3), duration)
+            t2 = min(max(t1 + 40, (effect_duration_ms * 2) // 3), duration)
             t3 = min(effect_duration_ms, duration)
             return (
-                f"{{\\pos({base_x},{base_y})"
-                f"\\t(0,{t1},\\pos({base_x-shake_amp+j},{base_y+shake_amp}))"
-                f"\\t({t1},{t2},\\pos({base_x+shake_amp+j},{base_y-shake_amp}))"
-                f"\\t({t2},{t3},\\pos({base_x},{base_y}))}}{processed_text}"
+                f"{{\\fscx{start_scale}\\fscy{start_scale}"
+                f"\\t(0,{t1},{accel:.2f},\\fscx{over_scale}\\fscy{over_scale})"
+                f"\\t({t1},{t2},\\fscx{under_scale}\\fscy{under_scale})"
+                f"\\t({t2},{t3},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.WHIP_SLIDE.value:
+            distance = max(40, int(280 * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, distance)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(50, int(effect_duration_ms * 0.55)), duration)
+            t2 = min(max(t1 + 40, int(effect_duration_ms * 0.80)), duration)
+            t3 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})"
+                f"\\frz{int(20*intensity)}"
+                f"\\t(0,{t1},{accel:.2f},\\frz{-int(8*intensity)}\\fscx108\\fscy92)"
+                f"\\t({t1},{t2},\\frz{int(4*intensity)}\\fscx96\\fscy104)"
+                f"\\t({t2},{t3},\\frz0\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.FLIP_IN.value:
+            start_scale = max(50, int(100 - 24 * intensity))
+            rot = max(18, int(48 * intensity))
+            # Чередуем сторону входа: слева/справа/слева/справа по индексу слова
+            side = -1 if (index % 2 == 0) else 1
+            lateral = max(40, int(140 * amp)) * side
+            lift = max(20, int(70 * amp))
+            sx, sy = base_x + lateral + j, base_y + lift
+            t1 = min(max(50, int(effect_duration_ms * 0.7)), duration)
+            t2 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})"
+                f"\\fscx{start_scale}\\fscy{start_scale}\\frx{rot}\\fry{-rot}\\frz{int(rot*0.35)}"
+                f"\\t(0,{t1},{accel:.2f},\\frx0\\fry0\\frz0\\fscx106\\fscy106)"
+                f"\\t({t1},{t2},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.RUBBER_BAND.value:
+            stretch = max(8, int(24 * intensity))
+            squash = max(6, int(14 * intensity))
+            t1 = min(max(30, effect_duration_ms // 4), duration)
+            t2 = min(max(t1 + 30, effect_duration_ms // 2), duration)
+            t3 = min(max(t2 + 30, (effect_duration_ms * 3) // 4), duration)
+            t4 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\fscx100\\fscy100"
+                f"\\t(0,{t1},\\fscx{100+stretch}\\fscy{100-squash})"
+                f"\\t({t1},{t2},\\fscx{100-stretch}\\fscy{100+squash})"
+                f"\\t({t2},{t3},\\fscx{100+int(stretch*0.45)}\\fscy{100-int(squash*0.45)})"
+                f"\\t({t3},{t4},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.STOMP.value:
+            lift = max(10, int(26 * intensity * amp))
+            impact = max(6, int(16 * intensity * amp))
+            t1 = min(max(35, effect_duration_ms // 3), duration)
+            t2 = min(max(t1 + 35, (effect_duration_ms * 2) // 3), duration)
+            t3 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({base_x},{base_y-lift},{base_x},{base_y+impact},0,{t1})\\fscx104\\fscy96"
+                f"\\t(0,{t1},{accel:.2f},\\fscx88\\fscy116)"
+                f"\\t({t1},{t2},\\fscx106\\fscy94)"
+                f"\\t({t2},{t3},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.BLAST_IN.value:
+            dist = max(90, int(340 * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, dist)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(40, effect_duration_ms // 3), duration)
+            t2 = min(max(t1 + 40, (effect_duration_ms * 2) // 3), duration)
+            t3 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})\\fscx55\\fscy55\\frz{int(28*intensity)}"
+                f"\\t(0,{t1},{accel:.2f},\\fscx124\\fscy124\\frz{-int(8*intensity)})"
+                f"\\t({t1},{t2},\\fscx94\\fscy94\\frz{int(3*intensity)})"
+                f"\\t({t2},{t3},\\fscx100\\fscy100\\frz0)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.HELIX_SPIN.value:
+            dist = max(70, int(220 * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, dist)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(40, effect_duration_ms // 2), duration)
+            t2 = min(effect_duration_ms, duration)
+            rot = int(540 * intensity)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})\\frz{-rot}\\fscx72\\fscy72"
+                f"\\t(0,{t1},{accel:.2f},\\frz{int(rot*0.1)}\\fscx108\\fscy108)"
+                f"\\t({t1},{t2},\\frz0\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.VORTEX_IN.value:
+            dist = max(100, int(300 * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, dist)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(50, int(effect_duration_ms * 0.6)), duration)
+            t2 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})\\frx{int(38*intensity)}\\fry{-int(30*intensity)}\\alpha&HAA&"
+                f"\\t(0,{t1},{accel:.2f},\\frx0\\fry0\\alpha&H10&)"
+                f"\\t({t1},{t2},\\alpha&H00&)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.LASER_REVEAL.value:
+            t1 = min(max(40, effect_duration_ms // 3), duration)
+            t2 = min(max(t1 + 40, (effect_duration_ms * 2) // 3), duration)
+            t3 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\alpha&HFF&"
+                f"\\t(0,{t1},\\alpha&H00&)"
+                f"\\t({t1},{t2},\\bord4\\3a&H20&)"
+                f"\\t({t2},{t3},\\bord2\\3a&H00&)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.SIDESTEP_POP.value:
+            side = -1 if (index % 2 == 0) else 1
+            shift = max(50, int(170 * amp)) * side
+            sx, sy = base_x + shift + j, base_y
+            t1 = min(max(45, int(effect_duration_ms * 0.6)), duration)
+            t2 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})\\fscx86\\fscy114"
+                f"\\t(0,{t1},{accel:.2f},\\fscx108\\fscy94)"
+                f"\\t({t1},{t2},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.COMET_SWEEP.value:
+            dist = max(120, int(320 * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, dist)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(50, int(effect_duration_ms * 0.65)), duration)
+            t2 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})\\blur4\\frz{int(14*intensity)}"
+                f"\\t(0,{t1},{accel:.2f},\\blur1\\frz0\\fscx106\\fscy96)"
+                f"\\t({t1},{t2},\\blur0.6\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.PIXEL_POP.value:
+            t1 = min(max(40, effect_duration_ms // 3), duration)
+            t2 = min(max(t1 + 40, (effect_duration_ms * 2) // 3), duration)
+            t3 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\bord3\\blur0.4\\fscx92\\fscy92\\1a&H70&"
+                f"\\t(0,{t1},\\1a&H10&\\fscx116\\fscy116)"
+                f"\\t({t1},{t2},\\1a&H00&\\fscx96\\fscy96)"
+                f"\\t({t2},{t3},\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.COLOR_STROBE.value:
+            t1 = min(max(40, effect_duration_ms // 4), duration)
+            t2 = min(max(t1 + 40, effect_duration_ms // 2), duration)
+            t3 = min(max(t2 + 40, (effect_duration_ms * 3) // 4), duration)
+            t4 = min(effect_duration_ms, duration)
+            c1 = "&H00FF5A5A&"
+            c2 = "&H005AFF5A&"
+            c3 = "&H005A5AFF&"
+            return (
+                f"{{\\1c&H00FFFFFF&\\t(0,{t1},\\1c{c1})"
+                f"\\t({t1},{t2},\\1c{c2})"
+                f"\\t({t2},{t3},\\1c{c3})"
+                f"\\t({t3},{t4},\\1c&H00FFFFFF&)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.GHOST_TRAIL.value:
+            dist = max(90, int(240 * amp))
+            dx, dy = EffectManager._dir_to_offset(motion_direction, dist)
+            sx, sy = base_x + dx + j, base_y + dy
+            t1 = min(max(45, int(effect_duration_ms * 0.65)), duration)
+            t2 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\move({sx},{sy},{base_x},{base_y},0,{t1})\\alpha&H99&\\blur2.5"
+                f"\\t(0,{t1},{accel:.2f},\\alpha&H20&\\blur1.1\\fscx104\\fscy96)"
+                f"\\t({t1},{t2},\\alpha&H00&\\blur0.6\\fscx100\\fscy100)}}{processed_text}"
+            )
+
+        if effect_type == SubtitleEffect.PRISM_FLASH.value:
+            t1 = min(max(35, effect_duration_ms // 3), duration)
+            t2 = min(max(t1 + 35, (effect_duration_ms * 2) // 3), duration)
+            t3 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\bord2\\3c&H00404040&\\fscx96\\fscy96"
+                f"\\t(0,{t1},\\1c&H00FFE6A8&\\fscx110\\fscy110)"
+                f"\\t({t1},{t2},\\1c&H00A8E6FF&\\fscx94\\fscy94)"
+                f"\\t({t2},{t3},\\1c&H00FFFFFF&\\fscx100\\fscy100)}}{processed_text}"
             )
 
         if effect_type == SubtitleEffect.NEON_FLICKER.value:
@@ -753,6 +1024,23 @@ class EffectManager:
         if effect_type == SubtitleEffect.TWINKLE.value:
             alpha = max(0, min(255, int(68 * intensity)))
             return f"{{\\alpha&H{alpha:02X}&\\t(0,{min(effect_duration_ms, duration)},\\alpha&H00&)}}{processed_text}"
+
+        if effect_type == SubtitleEffect.GLITCH.value:
+            a1 = max(20, min(180, int(90 * intensity)))
+            a2 = max(10, min(140, int(60 * intensity)))
+            c1 = "&H00FF44FF&"
+            c2 = "&H00FFFF44&"
+            t1 = min(max(30, effect_duration_ms // 4), duration)
+            t2 = min(max(t1 + 30, effect_duration_ms // 2), duration)
+            t3 = min(max(t2 + 30, (effect_duration_ms * 3) // 4), duration)
+            t4 = min(effect_duration_ms, duration)
+            return (
+                f"{{\\bord2\\shad0\\1a&H{a1:02X}&\\3a&H{a2:02X}&\\frz{int(2*intensity)}"
+                f"\\t(0,{t1},\\1c{c1}\\frz{-int(3*intensity)}\\fscx102\\fscy98)"
+                f"\\t({t1},{t2},\\1c{c2}\\frz{int(2*intensity)}\\fscx98\\fscy102)"
+                f"\\t({t2},{t3},\\1c&H00FFFFFF&\\frz{-int(1*intensity)})"
+                f"\\t({t3},{t4},\\1a&H00&\\3a&H00&\\frz0\\fscx100\\fscy100)}}{processed_text}"
+            )
 
         if effect_type == SubtitleEffect.SHINE.value:
             alpha = max(0, min(255, int(68 * intensity)))

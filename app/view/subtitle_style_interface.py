@@ -128,15 +128,31 @@ SENTENCE_MODE_EFFECTS = {
 
 WORD_MODE_EFFECTS = {
     "bounce",
+    "bounce_spring",
     "pulse",
     "wave",
     "spin",
     "zoom_in",
+    "elastic_pop",
     "swing",
     "slide_up",
     "slide_left",
+    "whip_slide",
+    "flip_in",
     "pop_rotate",
+    "rubber_band",
     "shake",
+    "stomp",
+    "blast_in",
+    "helix_spin",
+    "vortex_in",
+    "laser_reveal",
+    "sidestep_pop",
+    "comet_sweep",
+    "pixel_pop",
+    "color_strobe",
+    "ghost_trail",
+    "prism_flash",
     "neon_flicker",
     "glitch",
     "twinkle",
@@ -479,6 +495,7 @@ class SubtitleStyleInterface(QWidget):
     def _initSettingCards(self):
         """初始化所有设置卡片"""
         self.effect_options = EffectManager.get_effect_options()
+        self.effect_category_options = EffectManager.get_effect_category_options()
 
         # 字幕排布设置
         self.layoutCard = ComboBoxSettingCard(
@@ -493,6 +510,12 @@ class SubtitleStyleInterface(QWidget):
             "Эффект субтитров",
             "Выберите анимацию появления субтитров",
             texts=list(self.effect_options.keys()),
+        )
+        self.effectCategoryCard = ComboBoxSettingCard(
+            FIF.FILTER,
+            "Тип эффекта",
+            "Фильтр списка эффектов по категориям",
+            texts=list(self.effect_category_options.keys()),
         )
 
         self.effectDurationCard = SpinBoxSettingCard(
@@ -882,6 +905,7 @@ class SubtitleStyleInterface(QWidget):
         # 1) Быстрый старт
         self.quickStartGroup.addSettingCard(self.presetCard)
         self.quickStartGroup.addSettingCard(self.layoutCard)
+        self.quickStartGroup.addSettingCard(self.effectCategoryCard)
         self.quickStartGroup.addSettingCard(self.effectCard)
 
         # 2) Разбиение и структура
@@ -1126,6 +1150,7 @@ class SubtitleStyleInterface(QWidget):
             )
         )
         self.effectCard.currentTextChanged.connect(self.onSettingChanged)
+        self.effectCategoryCard.currentTextChanged.connect(self._on_effect_category_changed)
         self.effectCard.currentTextChanged.connect(
             lambda text: cfg.set(
                 cfg.subtitle_effect,
@@ -1752,10 +1777,43 @@ class SubtitleStyleInterface(QWidget):
             self.saveStyle("default")  # 如果没有选择样式,保存为默认样式
 
     def _on_split_type_changed(self):
+        self._refresh_effect_category_options_by_split_mode()
         self._refresh_effect_options_by_split_mode()
         self._refresh_preview_text_options()
         self._update_word_timestamp_hint()
         self.onSettingChanged()
+
+    def _on_effect_category_changed(self):
+        self._refresh_effect_options_by_split_mode()
+        self.onSettingChanged()
+
+    def _refresh_effect_category_options_by_split_mode(self):
+        allowed = self._get_allowed_effect_values()
+        current_label = self.effectCategoryCard.comboBox.currentText()
+
+        # Категории, которые реально имеют эффекты в текущем split-режиме.
+        available_categories = {
+            category
+            for _, value, category in EffectManager.EFFECT_REGISTRY
+            if value in allowed
+        }
+
+        full_options = EffectManager.get_effect_category_options()  # {label: key}
+        filtered_labels = ["Все типы"]
+        for label, key in full_options.items():
+            if key == "all":
+                continue
+            if key in available_categories:
+                filtered_labels.append(label)
+
+        self.effectCategoryCard.comboBox.blockSignals(True)
+        self.effectCategoryCard.comboBox.clear()
+        self.effectCategoryCard.comboBox.addItems(filtered_labels)
+        if current_label in filtered_labels:
+            self.effectCategoryCard.comboBox.setCurrentText(current_label)
+        else:
+            self.effectCategoryCard.comboBox.setCurrentText("Все типы")
+        self.effectCategoryCard.comboBox.blockSignals(False)
 
     def _is_word_mode(self) -> bool:
         return self.splitTypeCard.comboBox.currentText() == "По словам"
@@ -1766,11 +1824,13 @@ class SubtitleStyleInterface(QWidget):
     def _refresh_effect_options_by_split_mode(self):
         allowed = self._get_allowed_effect_values()
         current_label = self.effectCard.comboBox.currentText()
+        current_category_label = self.effectCategoryCard.comboBox.currentText()
+        selected_category = self.effect_category_options.get(current_category_label, "all")
 
         filtered = [
             label
-            for label, value in self.effect_options.items()
-            if value in allowed
+            for label, value, category in EffectManager.EFFECT_REGISTRY
+            if value in allowed and (selected_category == "all" or category == selected_category)
         ]
         if not filtered:
             filtered = ["Без эффекта"]
