@@ -12,6 +12,8 @@ from typing import Dict, List, Optional
 from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QStandardPaths, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
+    QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -20,6 +22,7 @@ from PyQt5.QtWidgets import (
     QSlider,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -493,6 +496,8 @@ class AutoShortsInterface(QWidget):
         self.original_video_duration_s = 0
         self.selected_start_s = 0
         self.selected_end_s = 1
+        self._duration_probe_failed = False
+        self._duration_probe_error_details = ""
         self.asr_payload: Dict = {}
         self._autonomous_run = False
         self._active_progress_stage = 0
@@ -1625,7 +1630,9 @@ class AutoShortsInterface(QWidget):
         self._load_source_preview_frame(self.video_path, self.preview_time_s.value())
 
     def _sync_range_with_video_duration(self, video_path: str):
-        duration_s = self._probe_video_duration_s(video_path)
+        duration_s, probe_details = self._probe_video_duration_info(video_path)
+        self._duration_probe_error_details = str(probe_details or "")
+        self._duration_probe_failed = bool(duration_s <= 1)
         self.video_duration_s = max(1, duration_s)
         self.original_video_duration_s = self.video_duration_s
         self.selected_start_s = 0
@@ -1633,6 +1640,19 @@ class AutoShortsInterface(QWidget):
         self.range_slider.set_bounds(0, self.video_duration_s)
         self.range_slider.set_values(self.selected_start_s, self.selected_end_s, emit_signal=False)
         self._update_range_labels()
+        if self._duration_probe_failed:
+            self._show_copyable_error(
+                title="Не удалось определить длительность видео",
+                message=(
+                    "Программа не смогла корректно прочитать длительность файла. "
+                    "Из-за этого диапазон времени ограничен 1 секундой.\n\n"
+                    "Что можно сделать:\n"
+                    "1) Переимпортировать этот файл\n"
+                    "2) Перекодировать в MP4 (H.264/AAC) и повторить\n"
+                    "3) Если ошибка повторяется — скопируйте детали и отправьте разработчику"
+                ),
+                details=self._duration_probe_error_details,
+            )
         # Не меняем min/max кандидатов автоматически при выборе ролика.
         # Рекомендации применяются только по кнопке "Рекомендовать по длине".
 
@@ -1671,7 +1691,7 @@ class AutoShortsInterface(QWidget):
         )
 
     @staticmethod
-    def _probe_video_duration_s(video_path: str) -> int:
+    def _probe_video_duration_info(video_path: str) -> tuple[int, str]:
         """Возвращает длительность медиа в секундах.
 
         В некоторых окружениях ffprobe может не вернуть format=duration
@@ -1703,6 +1723,8 @@ class AutoShortsInterface(QWidget):
                 creationflags=(subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
             )
 
+        debug_lines: List[str] = [f"video_path={video_path}"]
+
         try:
             # 1) Базовый путь: format=duration
             p = _run_ffprobe([
@@ -1711,12 +1733,15 @@ class AutoShortsInterface(QWidget):
                 "-of",
                 "default=noprint_wrappers=1:nokey=1",
             ])
+            debug_lines.append(
+                f"ffprobe format=duration rc={p.returncode}, stdout={(p.stdout or '').strip()[:240]!r}, stderr={(p.stderr or '').strip()[:240]!r}"
+            )
             if p.returncode == 0:
                 lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
                 if lines:
                     v = _safe_int_seconds(lines[0])
                     if v > 0:
-                        return v
+                        return v, "\n".join(debug_lines)
 
             # 2) Fallback: stream=duration (полезно для отдельных контейнеров)
             p = _run_ffprobe([
@@ -1727,12 +1752,15 @@ class AutoShortsInterface(QWidget):
                 "-of",
                 "default=noprint_wrappers=1:nokey=1",
             ])
+            debug_lines.append(
+                f"ffprobe stream=duration rc={p.returncode}, stdout={(p.stdout or '').strip()[:240]!r}, stderr={(p.stderr or '').strip()[:240]!r}"
+            )
             if p.returncode == 0:
                 lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
                 if lines:
                     v = _safe_int_seconds(lines[0])
                     if v > 0:
-                        return v
+                        return v, "\n".join(debug_lines)
 
             # 3) Последний fallback: ffmpeg -i ... парсим строку Duration: HH:MM:SS.xx
             p = subprocess.run(
@@ -1744,6 +1772,9 @@ class AutoShortsInterface(QWidget):
                 creationflags=(subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
             )
             probe_text = f"{p.stdout or ''}\n{p.stderr or ''}"
+            debug_lines.append(
+                f"ffmpeg -i rc={p.returncode}, stderr_head={(p.stderr or '').strip()[:240]!r}"
+            )
             m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:[\.,]\d+)?)", probe_text)
             if m:
                 h = int(m.group(1))
@@ -1752,10 +1783,56 @@ class AutoShortsInterface(QWidget):
                 total = h * 3600 + mm * 60 + ss
                 v = _safe_int_seconds(total)
                 if v > 0:
-                    return v
+                    return v, "\n".join(debug_lines)
+        except Exception as e:
+            debug_lines.append(f"exception during probe: {e}")
+        return 1, "\n".join(debug_lines)
+
+    @staticmethod
+    def _probe_video_duration_s(video_path: str) -> int:
+        duration, _details = AutoShortsInterface._probe_video_duration_info(video_path)
+        return duration
+
+    def _show_copyable_error(self, title: str, message: str, details: str = ""):
+        full_text = f"{message}\n\n--- Технические детали ---\n{details or 'нет деталей'}"
+        try:
+            InfoBar.error(
+                title,
+                f"{message}\n(подробности доступны в окне, текст можно скопировать)",
+                duration=8000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
         except Exception:
             pass
-        return 1
+
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle(title)
+            dlg.resize(980, 520)
+            lay = QVBoxLayout(dlg)
+            txt = QTextEdit(dlg)
+            txt.setReadOnly(True)
+            txt.setPlainText(full_text)
+            lay.addWidget(txt)
+
+            btns = QHBoxLayout()
+            copy_btn = PrimaryPushButton("Скопировать ошибку", dlg)
+            close_btn = PushButton("Закрыть", dlg)
+            btns.addWidget(copy_btn)
+            btns.addWidget(close_btn)
+            btns.addStretch(1)
+            lay.addLayout(btns)
+
+            def _copy_err():
+                QApplication.clipboard().setText(txt.toPlainText())
+                InfoBar.success("Скопировано", "Текст ошибки скопирован в буфер", duration=1800, parent=dlg)
+
+            copy_btn.clicked.connect(_copy_err)
+            close_btn.clicked.connect(dlg.accept)
+            dlg.exec_()
+        except Exception:
+            pass
 
     def _start_full_pipeline(self):
         self._autonomous_run = True
@@ -1776,6 +1853,17 @@ class AutoShortsInterface(QWidget):
                 duration=2000,
                 position=InfoBarPosition.TOP,
                 parent=self,
+            )
+            return
+
+        if self._duration_probe_failed:
+            self._show_copyable_error(
+                title="Невозможно запустить этап",
+                message=(
+                    "Не определилась длительность видео (шкала стала 1 секунда). "
+                    "Переимпортируйте файл или перекодируйте его в MP4 (H.264/AAC), затем повторите."
+                ),
+                details=self._duration_probe_error_details,
             )
             return
 
