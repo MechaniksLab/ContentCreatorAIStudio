@@ -440,6 +440,71 @@ class ASRData:
             except (IndexError, ValueError):
                 return 2, 10, 10, 15
 
+        def _extract_style_fontsize(styles_text: str, style_name: str, fallback: int = 40) -> int:
+            """Возвращает Fontsize для стиля из ASS, иначе fallback."""
+            if not styles_text:
+                return fallback
+            m = re.search(rf"^Style:\s*{re.escape(style_name)}\s*,\s*(.+)$", styles_text, re.MULTILINE)
+            if not m:
+                return fallback
+            parts = [p.strip() for p in m.group(1).split(",")]
+            # Нормальный случай: m.group(1) начинается с Fontname,Fontsize,...
+            # значит Fontsize находится в parts[1].
+            # Для совместимости с нестандартными style-строками добавляем fallback
+            # на parts[2], если parts[1] оказался нечисловым/повреждённым.
+            for idx in (1, 2):
+                try:
+                    return max(1, int(float(parts[idx])))
+                except (IndexError, ValueError):
+                    continue
+            return fallback
+
+        def _estimate_line_width(text: str, font_size: int) -> int:
+            width = 0.0
+            for ch in text:
+                if re.match(r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]", ch):
+                    width += font_size
+                elif ch.isspace():
+                    width += font_size * 0.33
+                elif re.match(r"[A-ZА-ЯЁ]", ch):
+                    width += font_size * 0.68
+                elif re.match(r"[a-zа-яё]", ch):
+                    width += font_size * 0.60
+                elif re.match(r"[0-9]", ch):
+                    width += font_size * 0.58
+                else:
+                    width += font_size * 0.62
+            return int(width)
+
+        def _safe_scale_percent(raw_text: str, style_name: str) -> int:
+            plain = (raw_text or "").replace("\n", " ").strip()
+            if not plain:
+                return 100
+            font_size = _extract_style_fontsize(style_str, style_name, 40)
+            margin_px = int(max(0, min(40, int(safe_margin_x))) * play_res_x / 100) if safe_area_enabled else 0
+            safe_width = max(1, play_res_x - 2 * margin_px)
+            text_width = _estimate_line_width(plain, font_size)
+            if text_width <= safe_width:
+                return 100
+            return max(20, min(100, int((safe_width / max(1, text_width)) * 100)))
+
+        def _enforce_scale_cap(ass_text: str, max_scale: int) -> str:
+            if not ass_text:
+                return ass_text
+            cap = max(20, min(100, int(max_scale)))
+
+            def _cap_x(m):
+                return f"\\fscx{min(int(m.group(1)), cap)}"
+
+            def _cap_y(m):
+                return f"\\fscy{min(int(m.group(1)), cap)}"
+
+            out = re.sub(r"\\fscx(\d+)", _cap_x, ass_text)
+            out = re.sub(r"\\fscy(\d+)", _cap_y, out)
+            if "\\fscx" not in out and "\\fscy" not in out and cap < 100:
+                out = f"{{\\fscx{cap}\\fscy{cap}}}{out}"
+            return out
+
         def _anchor_from_style(
             alignment: int,
             margin_l: int,
@@ -594,6 +659,10 @@ class ASRData:
                 speaker_color_mode=speaker_color_mode,
                 motion_blur_strength=motion_blur_strength,
             )
+
+            # ВАЖНО: не зажимаем scale здесь, чтобы не "съедать" эффекты
+            # (особенно scale-based анимации). Safe Area финально применяется
+            # на этапе auto_wrap_ass_file в общем пайплайне.
 
             # 检查是否有译文
             has_translation = bool(translated and translated.strip())

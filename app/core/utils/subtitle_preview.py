@@ -13,6 +13,56 @@ from .video_utils import get_video_info
 logger = setup_logger("subtitle_preview")
 
 
+def _estimate_preview_text_width(text: str, font_px: int) -> int:
+    width = 0.0
+    for ch in (text or ""):
+        if ch.isspace():
+            width += font_px * 0.33
+        elif ch.isupper():
+            width += font_px * 0.68
+        elif ch.islower():
+            width += font_px * 0.60
+        else:
+            width += font_px * 0.62
+    return int(width)
+
+
+def _cap_preview_scale(
+    ass_text: str,
+    raw_text: str,
+    width: int,
+    height: int,
+    safe_enabled: bool,
+    safe_margin_x: int,
+    style_font_px: int,
+) -> str:
+    if not ass_text or not raw_text:
+        return ass_text
+    if not safe_enabled:
+        return ass_text
+
+    margin_px = int(max(0, min(40, int(safe_margin_x))) * int(width) / 100)
+    safe_width = max(1, int(width) - 2 * margin_px)
+    font_px = max(1, int(style_font_px or 1))
+    tw = _estimate_preview_text_width(str(raw_text).replace("\n", " "), font_px)
+    if tw <= safe_width:
+        return ass_text
+
+    cap = max(1, min(100, int((safe_width / max(1, tw)) * 100)))
+
+    def _cap_x(m):
+        return f"\\fscx{min(int(m.group(1)), cap)}"
+
+    def _cap_y(m):
+        return f"\\fscy{min(int(m.group(1)), cap)}"
+
+    out = __import__("re").sub(r"\\fscx(\d+)", _cap_x, ass_text)
+    out = __import__("re").sub(r"\\fscy(\d+)", _cap_y, out)
+    if "\\fscx" not in out and "\\fscy" not in out:
+        out = f"{{\\fscx{cap}\\fscy{cap}}}{out}"
+    return out
+
+
 def _build_preview_word_timestamps(text: Optional[str], start_ms: int, end_ms: int) -> list[dict]:
     """Строит простые word timestamps для предпросмотра эффектов karaoke."""
     raw = (text or "").strip()
@@ -211,8 +261,22 @@ def generate_ass_file(
         except ValueError:
             return 0.0
 
+    def _extract_style_font_size(styles_text: str, style_name: str, fallback: int = 40) -> int:
+        import re
+        m = re.search(rf"^Style:\s*{re.escape(style_name)}\s*,\s*(.+)$", styles_text, re.MULTILINE)
+        if not m:
+            return fallback
+        parts = [p.strip() for p in m.group(1).split(",")]
+        try:
+            # Name, Fontname, Fontsize, ...
+            return max(1, int(float(parts[2])))
+        except Exception:
+            return fallback
+
     default_blur = _extract_style_blur(style_str, "Default")
     secondary_blur = _extract_style_blur(style_str, "Secondary")
+    default_font_px = _extract_style_font_size(style_str, "Default", 40)
+    secondary_font_px = _extract_style_font_size(style_str, "Secondary", 30)
     default_anchor = _anchor_from_style(*_extract_style_position(style_str, "Default"))
     secondary_anchor = _anchor_from_style(*_extract_style_position(style_str, "Secondary"))
 
@@ -251,7 +315,7 @@ def generate_ass_file(
         gradient_mode=gradient_mode,
         gradient_color_1=gradient_color_1,
         gradient_color_2=gradient_color_2,
-        safe_area_enabled=safe_area_enabled,
+        safe_area_enabled=False,
         safe_margin_x=safe_margin_x,
         safe_margin_y=safe_margin_y,
         speaker_color_mode=speaker_color_mode,
@@ -285,7 +349,7 @@ def generate_ass_file(
         gradient_mode=gradient_mode,
         gradient_color_1=gradient_color_1,
         gradient_color_2=gradient_color_2,
-        safe_area_enabled=safe_area_enabled,
+        safe_area_enabled=False,
         safe_margin_x=safe_margin_x,
         safe_margin_y=safe_margin_y,
         speaker_color_mode=speaker_color_mode,
@@ -296,11 +360,8 @@ def generate_ass_file(
         anchor_x=secondary_anchor[0],
         anchor_y=secondary_anchor[1],
     )
-
-    if original_text and default_blur > 0:
-        original_text = f"{{\\blur{default_blur}}}{original_text}"
-    if translated_text and secondary_blur > 0:
-        translated_text = f"{{\\blur{secondary_blur}}}{translated_text}"
+    # Не накладываем дополнительный blur в preview,
+    # чтобы толщина/чёткость обводки совпадала с финальным рендером.
 
     dialogue = (
         [
@@ -400,7 +461,11 @@ def generate_preview(
         safe_margin_y,
         speaker_color_mode,
     )
-    ass_file = auto_wrap_ass_file(ass_file)
+    ass_file = auto_wrap_ass_file(
+        ass_file,
+        safe_margin_x_percent=safe_margin_x,
+        safe_area_enabled=safe_area_enabled,
+    )
     bg_path = ensure_background(Path(bg_path))
 
     output_path = (
@@ -426,7 +491,7 @@ def generate_preview(
         "-ss",
         str(preview_time_sec),
         "-vf",
-        f"ass={ass_file_processed}",
+        f"ass={ass_file_processed},format=yuv420p",
         "-frames:v",
         "1",
         str(output_path),
@@ -513,12 +578,25 @@ def generate_preview_video(
             except ValueError:
                 return 0.0
 
+        def _extract_style_font_size(styles_text: str, style_name: str, fallback: int = 40) -> int:
+            import re
+            m = re.search(rf"^Style:\s*{re.escape(style_name)}\s*,\s*(.+)$", styles_text, re.MULTILINE)
+            if not m:
+                return fallback
+            parts = [p.strip() for p in m.group(1).split(",")]
+            try:
+                # Name, Fontname, Fontsize, ...
+                return max(1, int(float(parts[2])))
+            except Exception:
+                return fallback
+
         def _build_effect_word_lines(
             text: Optional[str],
             style_name: str,
             anchor: tuple[int, int],
             blur: float,
             index_shift: int,
+            style_font_px: int,
         ) -> list[str]:
             tokens = _split_preview_tokens(text)
             if not tokens:
@@ -557,7 +635,7 @@ def generate_preview_video(
                     gradient_mode=gradient_mode,
                     gradient_color_1=gradient_color_1,
                     gradient_color_2=gradient_color_2,
-                    safe_area_enabled=safe_area_enabled,
+                    safe_area_enabled=False,
                     safe_margin_x=safe_margin_x,
                     safe_margin_y=safe_margin_y,
                     speaker_color_mode=speaker_color_mode,
@@ -574,8 +652,9 @@ def generate_preview_video(
                     anchor_x=anchor[0],
                     anchor_y=anchor[1],
                 )
-                if token_effect and blur > 0:
-                    token_effect = f"{{\\blur{blur}}}{token_effect}"
+                # Safe Area fit применяем единообразно на уровне auto_wrap_ass_file,
+                # чтобы preview/final совпадали и не терялись scale-based эффекты.
+                # Без дополнительного blur в preview для一致ности с финальным рендером.
 
                 lines.append(
                     f"Dialogue: 0,{_ass_time_from_ms(start_ms)},{_ass_time_from_ms(end_ms)},{style_name},,0,0,0,,{token_effect}"
@@ -587,6 +666,8 @@ def generate_preview_video(
         secondary_anchor = _anchor_from_style(*_extract_style_position(style_str, "Secondary"))
         default_blur = _extract_style_blur(style_str, "Default")
         secondary_blur = _extract_style_blur(style_str, "Secondary")
+        default_font_px = _extract_style_font_size(style_str, "Default", 40)
+        secondary_font_px = _extract_style_font_size(style_str, "Secondary", 30)
 
         dialogue_lines = []
         if translate_text:
@@ -597,6 +678,7 @@ def generate_preview_video(
                     secondary_anchor,
                     secondary_blur,
                     100,
+                    secondary_font_px,
                 )
             )
         dialogue_lines.extend(
@@ -606,6 +688,7 @@ def generate_preview_video(
                 default_anchor,
                 default_blur,
                 0,
+                default_font_px,
             )
         )
 
@@ -645,7 +728,11 @@ def generate_preview_video(
             safe_margin_y,
             speaker_color_mode,
         )
-    ass_file = auto_wrap_ass_file(ass_file)
+    ass_file = auto_wrap_ass_file(
+        ass_file,
+        safe_margin_x_percent=safe_margin_x,
+        safe_area_enabled=safe_area_enabled,
+    )
     bg_path = ensure_background(Path(bg_path))
 
     output_path = PREVIEW_VIDEO_FILENAME
@@ -660,7 +747,7 @@ def generate_preview_video(
         "-i",
         str(bg_path),
         "-vf",
-        f"ass={ass_file_processed}",
+        f"ass={ass_file_processed},format=yuv420p",
         "-t",
         str(duration_sec),
         "-r",

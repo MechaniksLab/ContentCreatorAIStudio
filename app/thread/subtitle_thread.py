@@ -249,6 +249,16 @@ class SubtitleThread(QThread):
             subtitle_config.use_processed_subtitle_cache = bool(
                 cfg.use_processed_subtitle_cache.value
             )
+            subtitle_config.use_cache = bool(cfg.use_subtitle_cache.value)
+            # Если отключён кэш «обработанных субтитров»,
+            # принудительно отключаем и внутренние кэши split/optimize/translate
+            # в рамках этого прогона, чтобы пользователь гарантированно видел
+            # полностью свежую обработку.
+            if not subtitle_config.use_processed_subtitle_cache:
+                subtitle_config.use_cache = False
+                logger.info(
+                    "UseProcessedSubtitleCache=OFF: принудительно отключены внутренние LLM/translate cache для текущего прогона"
+                )
             subtitle_config.subtitle_layout = cfg.subtitle_layout.value
             subtitle_config.subtitle_style = get_subtitle_style(
                 cfg.subtitle_style_name.value

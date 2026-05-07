@@ -144,6 +144,8 @@ def add_subtitles(
     resolution: str = "1080x1920",
     quality_profile: str = "high",
     render_backend: str = "gpu",
+    safe_area_enabled: bool = True,
+    safe_margin_x: int = 8,
     progress_callback: callable = None,
 ) -> None:
     assert Path(input_file).is_file(), "输入文件不存在"
@@ -161,6 +163,8 @@ def add_subtitles(
     if suffix == ".ass":
         subtitle_file = auto_wrap_ass_file(
             subtitle_file,
+            safe_margin_x_percent=int(safe_margin_x),
+            safe_area_enabled=bool(safe_area_enabled),
             # video_width=video_info["width"],
             # video_height=video_info["height"],
         )
@@ -244,11 +248,22 @@ def add_subtitles(
                 except Exception:
                     target_resolution = None
 
-        vf_parts = [vf_base]
+        # Важно: для ASS сначала масштабируем видео до целевого разрешения,
+        # и только потом накладываем ass. Иначе при scale после ass толщина
+        # обводки визуально «плывёт» между роликами разных исходных размеров.
+        if suffix == ".ass" and target_resolution:
+            vf_parts = [
+                f"scale={target_resolution[0]}:{target_resolution[1]}:flags=lanczos",
+                vf_base,
+            ]
+        else:
+            vf_parts = [vf_base]
+            if target_resolution:
+                vf_parts.append(
+                    f"scale={target_resolution[0]}:{target_resolution[1]}:flags=lanczos"
+                )
         if target_fps:
             vf_parts.append(f"fps={target_fps}")
-        if target_resolution:
-            vf_parts.append(f"scale={target_resolution[0]}:{target_resolution[1]}:flags=lanczos")
         vf = ",".join(vf_parts)
 
         profile = str(quality_profile or "high").strip().lower()

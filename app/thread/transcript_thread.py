@@ -46,6 +46,13 @@ class TranscriptThread(QThread):
                 logger.info(
                     "UseProcessedSubtitleCache=OFF: отключаем только shortcut-ветки, ASR-кэш остаётся по настройке UseASRCache"
                 )
+                # По запросу пользователя: при отключении кэша обработанных субтитров
+                # ожидается полный «свежий» прогон, без пропуска этапа распознавания
+                # из ASR-кэша.
+                self.task.transcribe_config.use_asr_cache = False
+                logger.info(
+                    "UseProcessedSubtitleCache=OFF: также отключаем ASR cache для текущего прогона"
+                )
 
             # 检查是否已经存在字幕文件
             # if Path(self.task.output_path).exists():

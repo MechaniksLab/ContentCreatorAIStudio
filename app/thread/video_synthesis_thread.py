@@ -59,6 +59,8 @@ class VideoSynthesisThread(QThread):
                 render_backend=str(
                     getattr(self.task.synthesis_config, "render_backend", "gpu") or "gpu"
                 ),
+                safe_area_enabled=bool(cfg.subtitle_safe_area_enabled.value),
+                safe_margin_x=int(cfg.subtitle_safe_margin_x.value),
                 progress_callback=self.progress_callback,
             )
 

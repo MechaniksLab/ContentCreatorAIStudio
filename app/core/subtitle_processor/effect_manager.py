@@ -498,6 +498,30 @@ class EffectManager:
         return "".join(out)
 
     @staticmethod
+    def _strip_ass_overrides(text: str) -> str:
+        if not text:
+            return text
+        return re.sub(r"\{[^}]*\}", "", text)
+
+    @staticmethod
+    def _estimate_text_width(text: str, font_size_px: int) -> int:
+        width = 0.0
+        for ch in text:
+            if re.match(r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]", ch):
+                width += font_size_px
+            elif ch.isspace():
+                width += font_size_px * 0.33
+            elif re.match(r"[A-ZА-ЯЁ]", ch):
+                width += font_size_px * 0.68
+            elif re.match(r"[a-zа-яё]", ch):
+                width += font_size_px * 0.60
+            elif re.match(r"[0-9]", ch):
+                width += font_size_px * 0.58
+            else:
+                width += font_size_px * 0.62
+        return int(width)
+
+    @staticmethod
     def _choose_word_ts_transform(
         raw_pairs: List[tuple[float, float]],
         seg_start: int,
@@ -711,6 +735,20 @@ class EffectManager:
                 gradient_color_1,
                 gradient_color_2,
             )
+
+        # Safe-area fit по ширине: гарантированно ужимаем длинные слова/фразы,
+        # чтобы они не выходили за границы (в т.ч. в live preview/preview video).
+        if safe_area_enabled:
+            visible_text = EffectManager._strip_ass_overrides(processed_text).replace("\\N", " ").strip()
+            if visible_text:
+                safe_margin_ratio = max(0.0, min(0.4, float(safe_margin_x) / 100.0))
+                safe_width = max(1, int(safe_x * (1.0 - 2.0 * safe_margin_ratio)))
+                # Базовый approx размера glyph: используем ~6% высоты кадра как безопасный ориентир.
+                approx_font_px = max(12, int(safe_y * 0.06))
+                text_width = EffectManager._estimate_text_width(visible_text, approx_font_px)
+                if text_width > safe_width:
+                    fit_scale = max(20, min(100, int((safe_width / max(1, text_width)) * 100)))
+                    processed_text = f"{{\\fscx{fit_scale}\\fscy{fit_scale}}}{processed_text}"
 
         if auto_contrast:
             processed_text = f"{{\\bord3\\shad1\\3c&H000000&\\blur1}}{processed_text}"
