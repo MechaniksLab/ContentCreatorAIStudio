@@ -14,9 +14,13 @@ import openai
 
 from app.config import LOG_PATH
 from app.core.bk_asr.asr_data import ASRData
+from app.core.utils.media_binaries import resolve_project_media_binary
 from app.core.utils.logger import setup_logger
 
 logger = setup_logger("shorts_processor")
+
+FFMPEG_BIN = resolve_project_media_binary("ffmpeg")
+FFPROBE_BIN = resolve_project_media_binary("ffprobe")
 
 RENDER_DEBUG_LOG = LOG_PATH / "auto_shorts_render.log"
 MAX_HEURISTIC_CANDIDATES = None
@@ -1401,7 +1405,7 @@ def render_shorts(
         cpu_args = _cpu_codec_args_by_quality(quality_profile)
         try:
             p = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
+                [FFMPEG_BIN, "-hide_banner", "-encoders"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

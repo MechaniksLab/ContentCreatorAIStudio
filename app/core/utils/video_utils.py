@@ -9,8 +9,12 @@ from typing import Dict, Literal, Optional
 from app.config import APP_NAME
 from ..utils.logger import setup_logger
 from ..utils.ass_auto_wrap import auto_wrap_ass_file
+from ..utils.media_binaries import resolve_project_media_binary
 
 logger = setup_logger("video_utils")
+
+FFMPEG_BIN = resolve_project_media_binary("ffmpeg")
+FFPROBE_BIN = resolve_project_media_binary("ffprobe")
 
 
 def video2audio(input_file: str, output: str = "") -> bool:
@@ -20,7 +24,7 @@ def video2audio(input_file: str, output: str = "") -> bool:
     output.parent.mkdir(parents=True, exist_ok=True)
     output = str(output)
     cmd = [
-        "ffmpeg",
+        FFMPEG_BIN,
         "-i",
         input_file,
         "-map",
@@ -65,7 +69,7 @@ def check_cuda_available() -> bool:
     try:
         # 首先检查ffmpeg是否支持cuda
         result = subprocess.run(
-            ["ffmpeg", "-hwaccels"],
+            [FFMPEG_BIN, "-hwaccels"],
             capture_output=True,
             text=True,
             creationflags=(
@@ -80,7 +84,7 @@ def check_cuda_available() -> bool:
 
         # 进一步检查CUDA设备信息
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-init_hw_device", "cuda"],
+            [FFMPEG_BIN, "-hide_banner", "-init_hw_device", "cuda"],
             capture_output=True,
             text=True,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -106,7 +110,7 @@ def _has_ffmpeg_encoder(encoder_name: str) -> bool:
     """Проверяет, доступен ли кодек в ffmpeg -encoders."""
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [FFMPEG_BIN, "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             creationflags=(
@@ -185,7 +189,7 @@ def add_subtitles(
             )
         # 添加软字幕
         cmd = [
-            "ffmpeg",
+            FFMPEG_BIN,
             "-i",
             input_file,
             "-i",
@@ -319,7 +323,7 @@ def add_subtitles(
             else:
                 logger.info("Выбран CPU-рендер: используем libx264")
 
-        cmd = ["ffmpeg"]
+        cmd = [FFMPEG_BIN]
         if use_cuda:
             logger.info("使用CUDA加速")
             cmd.extend(["-hwaccel", "cuda"])
@@ -416,7 +420,7 @@ def add_subtitles(
 def get_video_info(file_path: str) -> Optional[Dict]:
     """获取视频信息"""
     try:
-        cmd = ["ffmpeg", "-i", file_path]
+        cmd = [FFMPEG_BIN, "-i", file_path]
 
         # logger.info(f"获取视频信息执行命令: {' '.join(cmd)}")
         result = subprocess.run(

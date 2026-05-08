@@ -25,6 +25,7 @@ from app.core.entities import TranslatorServiceEnum, VideoTranslateTask
 from app.core.subtitle_processor.translate import TranslatorFactory, TranslatorType
 from app.core.utils import json_repair
 from app.core.utils.logger import setup_logger
+from app.core.utils.media_binaries import resolve_project_media_binary
 from app.core.utils.video_utils import video2audio
 from app.core.video_translate.bootstrap import VideoTranslateBootstrap
 from app.core.video_translate.diarization import (
@@ -36,6 +37,9 @@ from app.core.video_translate.service_manager import VideoTranslateServiceManage
 from app.core.video_translate.rvc_model_registry import default_rvc_model_root, scan_rvc_models
 
 logger = setup_logger("video_translate_processor")
+
+FFMPEG_BIN = resolve_project_media_binary("ffmpeg")
+FFPROBE_BIN = resolve_project_media_binary("ffprobe")
 
 _SPEAKER_ANALYSIS_CACHE = PROJECT_ROOT / "AppData" / "cache" / "video_translate_last_speakers.json"
 _LAST_TRANSLATION_CACHE = PROJECT_ROOT / "AppData" / "cache" / "video_translate_last_translation.json"
@@ -67,7 +71,7 @@ def _probe_audio_duration_ms(path: Path) -> int:
     try:
         r = subprocess.run(
             [
-                "ffprobe",
+                FFPROBE_BIN,
                 "-v",
                 "error",
                 "-show_entries",
@@ -97,7 +101,7 @@ def _probe_mean_db_with_filter(path: Path, afilter: str) -> Optional[float]:
     try:
         p = subprocess.run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-hide_banner",
                 "-i",
                 str(path),
@@ -536,7 +540,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
         try:
             p = subprocess.run(
                 [
-                    "ffmpeg",
+                    FFMPEG_BIN,
                     "-hide_banner",
                     "-i",
                     str(path),
@@ -638,7 +642,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
 
             _safe_run(
                 [
-                    "ffmpeg",
+                    FFMPEG_BIN,
                     "-y",
                     "-i",
                     str(src_wav),
@@ -1006,7 +1010,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
                 try:
                     _safe_run(
                         [
-                            "ffmpeg",
+                            FFMPEG_BIN,
                             "-y",
                             "-ss",
                             f"{start_sec:.3f}",
@@ -1053,7 +1057,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
                 try:
                     _safe_run(
                         [
-                            "ffmpeg",
+                            FFMPEG_BIN,
                             "-y",
                             "-f",
                             "concat",
@@ -1126,7 +1130,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
                     clip_dur_sec = max(0.20, (seg.end_ms - seg.start_ms) / 1000.0 + pre_pad_sec + post_pad_sec)
                     _safe_run(
                         [
-                            "ffmpeg",
+                            FFMPEG_BIN,
                             "-y",
                             "-ss",
                             f"{clip_start_sec:.3f}",
@@ -1318,7 +1322,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
         silence = work_dir / "silence.wav"
         _safe_run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-y",
                 "-f",
                 "lavfi",
@@ -1331,7 +1335,7 @@ class LocalXTTSProvider(BaseVoiceCloneProvider):
         )
 
         mixed = work_dir / "dubbed_voice.wav"
-        cmd = ["ffmpeg", "-y", "-i", str(silence)]
+        cmd = [FFMPEG_BIN, "-y", "-i", str(silence)]
         for p in wav_segments:
             cmd += ["-i", str(p)]
 
@@ -1434,7 +1438,7 @@ class ElevenLabsProvider(BaseVoiceCloneProvider):
 
             _safe_run(
                 [
-                    "ffmpeg",
+                    FFMPEG_BIN,
                     "-y",
                     "-i",
                     str(mp3_path),
@@ -1454,7 +1458,7 @@ class ElevenLabsProvider(BaseVoiceCloneProvider):
         silence = work_dir / "silence.wav"
         _safe_run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-y",
                 "-f",
                 "lavfi",
@@ -1467,7 +1471,7 @@ class ElevenLabsProvider(BaseVoiceCloneProvider):
         )
 
         mixed = work_dir / "dubbed_voice.wav"
-        cmd = ["ffmpeg", "-y", "-i", str(silence)]
+        cmd = [FFMPEG_BIN, "-y", "-i", str(silence)]
         for p in wav_segments:
             cmd += ["-i", str(p)]
 
@@ -2115,7 +2119,7 @@ class VideoTranslationProcessor:
         decode_backend = str(getattr(cfg, "video_decode_backend", "auto") or "auto").strip().lower()
         encode_backend = str(getattr(cfg, "video_encode_backend", "copy") or "copy").strip().lower()
 
-        base_cmd = ["ffmpeg", "-y"]
+        base_cmd = [FFMPEG_BIN, "-y"]
         if decode_backend == "cuda":
             base_cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
 
@@ -2157,7 +2161,7 @@ class VideoTranslationProcessor:
                     e,
                 )
                 fallback_cmd = [
-                    "ffmpeg",
+                    FFMPEG_BIN,
                     "-y",
                     "-i",
                     task.video_path,
