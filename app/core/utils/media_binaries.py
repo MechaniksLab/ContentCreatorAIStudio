@@ -20,6 +20,7 @@ def resolve_project_media_binary(tool_name: str) -> str:
         if Path(c).exists():
             return str(Path(c).resolve())
 
-    raise FileNotFoundError(
-        f"Не найден project binary: {name}. Ожидается в {BIN_PATH}"
-    )
+    # Важно: не падаем на import-time (часть модулей резолвит бинари при загрузке).
+    # Возвращаем ожидаемый project-only путь; фактическая ошибка проявится в месте вызова subprocess.
+    # PATH по-прежнему не используется.
+    return str((BIN_PATH / f"{name}.exe").resolve())
