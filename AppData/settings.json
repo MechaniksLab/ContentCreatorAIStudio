@@ -8,6 +8,7 @@
         "AutoShortsSpeechMinCoveragePercent": 74,
         "AutoShortsSpeechPostPadMs": 200,
         "AutoShortsSpeechPrePadMs": 150,
+        "AutoShortsUseCandidatesCache": true,
         "BatchSynthesisFpsMode": "60",
         "BatchSynthesisQualityProfile": "high",
         "BatchSynthesisRenderBackend": "gpu",

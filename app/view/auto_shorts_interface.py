@@ -753,10 +753,13 @@ class AutoShortsInterface(QWidget):
         )
         filter_row.addWidget(self.auto_filter_weak_checkbox)
         self.cache_candidates_checkbox = CheckBox("Кэшировать кандидатов (без повторного LLM)")
-        self.cache_candidates_checkbox.setChecked(True)
+        self.cache_candidates_checkbox.setChecked(bool(cfg.get(cfg.auto_shorts_use_candidates_cache)))
         self.cache_candidates_checkbox.setToolTip(
             "Если включено, результаты этапа 2 будут сохраняться и переиспользоваться\n"
             "при тех же ASR-данных и тех же параметрах отбора."
+        )
+        self.cache_candidates_checkbox.stateChanged.connect(
+            lambda _v: cfg.set(cfg.auto_shorts_use_candidates_cache, bool(self.cache_candidates_checkbox.isChecked()))
         )
         filter_row.addWidget(self.cache_candidates_checkbox)
         filter_row.addStretch(1)
@@ -2482,6 +2485,7 @@ class AutoShortsInterface(QWidget):
                 "preview_time_s": int(self.preview_time_s.value()),
                 "keep_aspect": bool(self.keep_aspect_checkbox.isChecked()),
                 "autonomous": bool(self.autonomous_checkbox.isChecked()),
+                "use_candidates_cache": bool(self.cache_candidates_checkbox.isChecked()),
                 "range_start_s": int(self.selected_start_s),
                 "range_end_s": int(self.selected_end_s),
                 "min_duration_s": int(self.min_duration.value()),
@@ -2802,6 +2806,9 @@ class AutoShortsInterface(QWidget):
                     )
                     self.autonomous_checkbox.setChecked(
                         bool(ui_settings.get("autonomous", self.autonomous_checkbox.isChecked()))
+                    )
+                    self.cache_candidates_checkbox.setChecked(
+                        bool(ui_settings.get("use_candidates_cache", self.cache_candidates_checkbox.isChecked()))
                     )
                     self.min_duration.setValue(
                         int(ui_settings.get("min_duration_s", self.min_duration.value()))

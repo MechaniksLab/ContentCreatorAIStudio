@@ -413,7 +413,8 @@ class AutoShortsCandidateThread(QThread):
             if not asr_json:
                 raise RuntimeError("Нет данных Whisper. Сначала выполните этап распознавания")
 
-            cache_key = self._build_candidates_cache_key(asr_json)
+            llm_cfg = AutoShortsTranscribeThread._resolve_llm_config()
+            cache_key = self._build_candidates_cache_key(asr_json, llm_cfg=llm_cfg)
             if self.use_candidates_cache:
                 cached = self._load_candidates_cache(cache_key)
                 if cached is not None:
@@ -426,7 +427,6 @@ class AutoShortsCandidateThread(QThread):
             source_offset_ms = int(self.asr_payload.get("source_offset_ms", 0) or 0)
 
             self.progress.emit(15, "LLM/эвристика: отбор интересных кандидатов...")
-            llm_cfg = AutoShortsTranscribeThread._resolve_llm_config()
             processor = ShortsProcessor(
                 min_duration_s=self.min_duration_s,
                 max_duration_s=self.max_duration_s,
@@ -473,9 +473,10 @@ class AutoShortsCandidateThread(QThread):
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    def _build_candidates_cache_key(self, asr_json: Dict) -> str:
+    def _build_candidates_cache_key(self, asr_json: Dict, llm_cfg: Dict[str, str] | None = None) -> str:
+        llm_cfg = dict(llm_cfg or {})
         payload = {
-            "v": 1,
+            "v": 2,
             "asr": asr_json,
             "source_offset_ms": int(self.asr_payload.get("source_offset_ms", 0) or 0),
             "min_duration_s": int(self.min_duration_s),
@@ -487,6 +488,9 @@ class AutoShortsCandidateThread(QThread):
             "auto_filter_profile": str(self.auto_filter_profile),
             "interest_threshold_percent": int(self.interest_threshold_percent),
             "llm_search_intensity": int(self.llm_search_intensity),
+            "llm_service": str(cfg.llm_service.value),
+            "llm_model": str(llm_cfg.get("model", "") or ""),
+            "llm_base_url": str(llm_cfg.get("base_url", "") or ""),
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()

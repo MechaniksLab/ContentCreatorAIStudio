@@ -395,6 +395,9 @@ class Config(QConfig):
     auto_shorts_repeat_similarity_percent = RangeConfigItem(
         "MainWindow", "AutoShortsRepeatSimilarityPercent", 82, RangeValidator(40, 100)
     )
+    auto_shorts_use_candidates_cache = ConfigItem(
+        "MainWindow", "AutoShortsUseCandidatesCache", True, BoolValidator()
+    )
     batch_synthesis_fps_mode = OptionsConfigItem(
         "MainWindow",
         "BatchSynthesisFpsMode",
