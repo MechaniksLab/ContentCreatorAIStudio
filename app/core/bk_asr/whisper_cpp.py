@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from ...config import MODEL_PATH
+from ..utils.media_binaries import resolve_project_media_binary
 from ..utils.logger import setup_logger
 from .asr_data import ASRDataSeg, ASRData
 from .base import BaseASR
@@ -198,7 +199,7 @@ class WhisperCppASR(BaseASR):
 
     def get_audio_duration(self, filepath: str) -> int:
         try:
-            cmd = ["ffmpeg", "-i", filepath]
+            cmd = [resolve_project_media_binary("ffmpeg"), "-i", filepath]
             result = subprocess.run(
                 cmd,
                 capture_output=True,

@@ -30,10 +30,11 @@ from qfluentwidgets import Action, BodyLabel, CardWidget, CheckBox, ComboBox, Co
 
 from app.common.config import cfg
 from app.common.theme_manager import get_theme_palette
-from app.config import APPDATA_PATH, WORK_PATH
+from app.config import APPDATA_PATH, BIN_PATH, WORK_PATH
 from app.core.entities import BatchTaskType, SupportedAudioFormats, SupportedVideoFormats
 from app.core.shorts import ShortCandidate, render_shorts
 from app.core.task_factory import TaskFactory
+from app.core.utils.media_binaries import resolve_project_media_binary
 
 
 class LayerPreviewWidget(QWidget):
@@ -1691,6 +1692,10 @@ class AutoShortsInterface(QWidget):
         )
 
     @staticmethod
+    def _resolve_media_binary(tool_name: str) -> str:
+        return resolve_project_media_binary(tool_name)
+
+    @staticmethod
     def _probe_video_duration_info(video_path: str) -> tuple[int, str]:
         """Возвращает длительность медиа в секундах.
 
@@ -1713,9 +1718,12 @@ class AutoShortsInterface(QWidget):
             except Exception:
                 return 0
 
+        ffprobe_bin = AutoShortsInterface._resolve_media_binary("ffprobe")
+        ffmpeg_bin = AutoShortsInterface._resolve_media_binary("ffmpeg")
+
         def _run_ffprobe(args: List[str]) -> subprocess.CompletedProcess:
             return subprocess.run(
-                ["ffprobe", "-v", "error", *args, video_path],
+                [ffprobe_bin, "-v", "error", *args, video_path],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1723,7 +1731,11 @@ class AutoShortsInterface(QWidget):
                 creationflags=(subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
             )
 
-        debug_lines: List[str] = [f"video_path={video_path}"]
+        debug_lines: List[str] = [
+            f"video_path={video_path}",
+            f"ffprobe_bin={ffprobe_bin}",
+            f"ffmpeg_bin={ffmpeg_bin}",
+        ]
 
         try:
             # 1) Базовый путь: format=duration
@@ -1764,7 +1776,7 @@ class AutoShortsInterface(QWidget):
 
             # 3) Последний fallback: ffmpeg -i ... парсим строку Duration: HH:MM:SS.xx
             p = subprocess.run(
-                ["ffmpeg", "-i", video_path],
+                [ffmpeg_bin, "-i", video_path],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -3271,7 +3283,7 @@ class AutoShortsInterface(QWidget):
                     f"[tmp][game]overlay={gm_out_x}:{gm_out_y}[vout]"
                 )
                 cmd_primary = [
-                    "ffmpeg",
+                    self._resolve_media_binary("ffmpeg"),
                     "-nostdin",
                     "-hide_banner",
                     "-loglevel",
@@ -3291,7 +3303,7 @@ class AutoShortsInterface(QWidget):
                 ]
 
                 cmd_fallback = [
-                    "ffmpeg",
+                    self._resolve_media_binary("ffmpeg"),
                     "-nostdin",
                     "-hide_banner",
                     "-loglevel",
@@ -3311,7 +3323,7 @@ class AutoShortsInterface(QWidget):
                 ]
             else:
                 cmd_primary = [
-                    "ffmpeg",
+                    self._resolve_media_binary("ffmpeg"),
                     "-nostdin",
                     "-hide_banner",
                     "-loglevel",
@@ -3328,7 +3340,7 @@ class AutoShortsInterface(QWidget):
                     temp_img,
                 ]
                 cmd_fallback = [
-                    "ffmpeg",
+                    self._resolve_media_binary("ffmpeg"),
                     "-nostdin",
                     "-hide_banner",
                     "-loglevel",
@@ -3467,7 +3479,7 @@ class AutoShortsInterface(QWidget):
             fd, temp_img = tempfile.mkstemp(suffix=".jpg")
             os.close(fd)
             cmd = [
-                "ffmpeg",
+                self._resolve_media_binary("ffmpeg"),
                 "-ss",
                 str(max(0, int(seek_s))),
                 "-i",

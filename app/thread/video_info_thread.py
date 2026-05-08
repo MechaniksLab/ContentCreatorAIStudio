@@ -7,6 +7,7 @@ from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from app.core.entities import VideoInfo
+from app.core.utils.media_binaries import resolve_project_media_binary
 from app.core.utils.logger import setup_logger
 
 logger = setup_logger("video_info_thread")
@@ -36,7 +37,7 @@ class VideoInfoThread(QThread):
     def _get_video_info(self, thumbnail_path: str) -> VideoInfo:
         """获取视频信息"""
         try:
-            cmd = ["ffmpeg", "-i", self.file_path]
+            cmd = [resolve_project_media_binary("ffmpeg"), "-i", self.file_path]
             # logger.info(f"获取视频信息执行命令: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
@@ -117,7 +118,7 @@ class VideoInfoThread(QThread):
             thumbnail_path = Path(thumbnail_path).as_posix()
 
             cmd = [
-                "ffmpeg",
+                resolve_project_media_binary("ffmpeg"),
                 "-ss", timestamp,
                 "-i", video_path,
                 "-vframes", "1",
