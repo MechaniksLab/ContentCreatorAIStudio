@@ -30,6 +30,12 @@ class GitHubUpdateManager:
     # Так мы подтягиваем обновления ассетов, но не сносим локальные бинарники
     # (например resource/bin/Faster-Whisper-XXL).
     SAFE_COPY_DIRS = [
+        # Важно: сюда попадают бинарники ffmpeg/ffprobe и другие runtime-tools,
+        # которые могут добавляться в новых релизах.
+        # Копируем без удаления локальных файлов (/E), чтобы:
+        # 1) докачивать новые бинарники (например ffprobe.exe),
+        # 2) не сносить пользовательские локальные дополнения.
+        "resource/bin",
         "resource/assets",
         "resource/subtitle_style",
         "resource/translations",
