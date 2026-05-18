@@ -43,7 +43,6 @@ class AutoShortsTranscribeThread(QThread):
 
     def run(self):
         temp_wav = None
-        temp_clip = None
         try:
             if not Path(self.video_path).exists():
                 raise FileNotFoundError("Видео файл не найден")
@@ -75,24 +74,20 @@ class AutoShortsTranscribeThread(QThread):
                 )
                 return
 
-            source_video_for_asr = self.video_path
-            if self.range_enabled and self.range_end_s > self.range_start_s:
-                self.progress.emit(3, "Подготовка тестового фрагмента...")
-                fd_clip, temp_clip = tempfile.mkstemp(suffix=".mp4")
-                os.close(fd_clip)
-                self._cut_video_segment(
-                    self.video_path,
-                    temp_clip,
-                    self.range_start_s,
-                    self.range_end_s,
-                )
-                source_video_for_asr = temp_clip
-
             self.progress.emit(5, "Подготовка аудио...")
             fd, temp_wav = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            if not video2audio(source_video_for_asr, output=temp_wav):
-                raise RuntimeError("Не удалось извлечь аудио из видео")
+            if self.range_enabled and self.range_end_s > self.range_start_s:
+                self.progress.emit(3, "Подготовка тестового фрагмента...")
+                self._extract_audio_segment(
+                    self.video_path,
+                    temp_wav,
+                    self.range_start_s,
+                    self.range_end_s,
+                )
+            else:
+                if not video2audio(self.video_path, output=temp_wav):
+                    raise RuntimeError("Не удалось извлечь аудио из видео")
 
             self.progress.emit(15, "Whisper: распознавание речи...")
             asr_data = self._transcribe_with_fast_profile(temp_wav, transcribe_task.transcribe_config)
@@ -114,11 +109,6 @@ class AutoShortsTranscribeThread(QThread):
             if temp_wav and Path(temp_wav).exists():
                 try:
                     Path(temp_wav).unlink()
-                except Exception:
-                    pass
-            if temp_clip and Path(temp_clip).exists():
-                try:
-                    Path(temp_clip).unlink()
                 except Exception:
                     pass
 
@@ -204,9 +194,8 @@ class AutoShortsTranscribeThread(QThread):
             logger.warning("AutoShorts ASR cache write failed: %s", e)
 
     @staticmethod
-    def _cut_video_segment(input_video: str, output_video: str, start_s: int, end_s: int):
-        # 1) Быстрый путь: remux без перекодирования (самый быстрый, почти без нагрузки)
-        cmd_copy = [
+    def _extract_audio_segment(input_video: str, output_wav: str, start_s: int, end_s: int):
+        cmd = [
             "ffmpeg",
             "-nostdin",
             "-hide_banner",
@@ -218,60 +207,18 @@ class AutoShortsTranscribeThread(QThread):
             str(end_s),
             "-i",
             input_video,
-            "-map",
-            "0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "copy",
-            "-avoid_negative_ts",
+            "-vn",
+            "-ac",
             "1",
-            "-y",
-            output_video,
-        ]
-        proc = subprocess.run(
-            cmd_copy,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=(
-                subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-            ),
-        )
-        if proc.returncode == 0 and Path(output_video).exists() and Path(output_video).stat().st_size > 0:
-            return
-
-        # 2) Fallback: быстрый NVENC (RTX), если copy не сработал
-        cmd_nvenc = [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            str(start_s),
-            "-to",
-            str(end_s),
-            "-i",
-            input_video,
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p5",
-            "-cq",
-            "23",
-            "-b:v",
-            "0",
+            "-ar",
+            "16000",
             "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
+            "pcm_s16le",
             "-y",
-            output_video,
+            output_wav,
         ]
         proc = subprocess.run(
-            cmd_nvenc,
+            cmd,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -280,47 +227,9 @@ class AutoShortsTranscribeThread(QThread):
                 subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
             ),
         )
-        if proc.returncode == 0 and Path(output_video).exists() and Path(output_video).stat().st_size > 0:
-            return
-
-        # 3) Последний fallback: CPU x264
-        cmd_cpu = [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            str(start_s),
-            "-to",
-            str(end_s),
-            "-i",
-            input_video,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "23",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-y",
-            output_video,
-        ]
-        proc = subprocess.run(
-            cmd_cpu,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=(
-                subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-            ),
-        )
-        if proc.returncode != 0 or not Path(output_video).exists() or Path(output_video).stat().st_size <= 0:
-            raise RuntimeError(f"Не удалось вырезать тестовый диапазон: {proc.stderr[-500:]}")
+        if proc.returncode != 0 or not Path(output_wav).exists() or Path(output_wav).stat().st_size <= 0:
+            err = (proc.stderr or proc.stdout or "")[-700:]
+            raise RuntimeError(f"Не удалось подготовить тестовый аудио-сегмент: {err}")
 
     @staticmethod
     def _resolve_llm_config() -> Dict[str, str]:
