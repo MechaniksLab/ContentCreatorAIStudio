@@ -326,9 +326,18 @@ class AutoShortsCandidateThread(QThread):
             cache_key = self._build_candidates_cache_key(asr_json, llm_cfg=llm_cfg)
             if self.use_candidates_cache:
                 cached = self._load_candidates_cache(cache_key)
+                # Совместимость: если строгий ключ не совпал (например, из-за смены
+                # LLM URL/модели или новых полей в ключе), пробуем более мягкий ключ.
+                if cached is None:
+                    legacy_key = self._build_candidates_cache_key_legacy(asr_json)
+                    if legacy_key != cache_key:
+                        cached = self._load_candidates_cache(legacy_key)
+                        if cached is not None:
+                            # Прогреваем новый ключ, чтобы в следующий раз попадать сразу.
+                            self._save_candidates_cache(cache_key, cached)
                 if cached is not None:
                     self.progress.emit(100, f"Кандидаты загружены из кэша: {len(cached)}")
-                    self.finished.emit(cached)
+                    self.finished.emit(self._sanitize_candidates_for_ui(cached))
                     return
 
             self.progress.emit(5, "Подготовка данных ASR...")
@@ -355,6 +364,7 @@ class AutoShortsCandidateThread(QThread):
                 asr_data,
                 progress_cb=lambda p, m: self.progress.emit(min(95, 20 + int(p * 0.75)), m),
             )
+            self.progress.emit(96, "Пост-обработка кандидатов...")
 
             if source_offset_ms > 0:
                 for c in candidates:
@@ -370,11 +380,36 @@ class AutoShortsCandidateThread(QThread):
             if self.use_candidates_cache:
                 self._save_candidates_cache(cache_key, result)
 
+            self.progress.emit(97, "Подготовка данных для отображения...")
+            ui_payload = self._sanitize_candidates_for_ui(result)
+            self.progress.emit(99, "Передача кандидатов в интерфейс...")
             self.progress.emit(100, f"Кандидаты готовы: {len(candidates)}")
-            self.finished.emit(result)
+            self.finished.emit(ui_payload)
         except Exception as e:
             logger.exception("Auto shorts candidate selection failed: %s", e)
             self.error.emit(str(e))
+
+    @staticmethod
+    def _sanitize_candidates_for_ui(candidates: List[Dict]) -> List[Dict]:
+        """Облегчает payload для передачи через Qt signal в UI.
+
+        Кэш на диске остаётся полным (save/load без изменений),
+        но в форму передаём укороченные текстовые поля, чтобы не фризить главный поток.
+        """
+        sanitized: List[Dict] = []
+        for c in candidates or []:
+            if not isinstance(c, dict):
+                continue
+            item = dict(c)
+            reason = str(item.get("reason", "") or "")
+            excerpt = str(item.get("excerpt", "") or "")
+            item["reason"] = reason[:420]
+            item["excerpt"] = excerpt[:560]
+            tags = item.get("explainability_tags")
+            if isinstance(tags, list):
+                item["explainability_tags"] = [str(t)[:48] for t in tags[:10]]
+            sanitized.append(item)
+        return sanitized
 
     @staticmethod
     def _candidate_cache_dir() -> Path:
@@ -400,6 +435,27 @@ class AutoShortsCandidateThread(QThread):
             "llm_service": str(cfg.llm_service.value),
             "llm_model": str(llm_cfg.get("model", "") or ""),
             "llm_base_url": str(llm_cfg.get("base_url", "") or ""),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _build_candidates_cache_key_legacy(self, asr_json: Dict) -> str:
+        """Старый/мягкий ключ кэша для обратной совместимости.
+
+        Не включает LLM endpoint/model и часть новых параметров,
+        чтобы подхватывать уже существующий кэш после обновлений UI.
+        """
+        payload = {
+            "v": 1,
+            "asr": asr_json,
+            "source_offset_ms": int(self.asr_payload.get("source_offset_ms", 0) or 0),
+            "min_duration_s": int(self.min_duration_s),
+            "max_duration_s": int(self.max_duration_s),
+            "repeat_similarity_percent": int(self.repeat_similarity_percent),
+            "min_candidates": int(self.min_candidates),
+            "max_candidates": int(self.max_candidates),
+            "auto_filter_weak_candidates": bool(self.auto_filter_weak_candidates),
+            "auto_filter_profile": str(self.auto_filter_profile),
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()

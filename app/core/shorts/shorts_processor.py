@@ -102,21 +102,40 @@ class ShortsProcessor:
                 progress_cb(12, "AI Enterprise: семантический анализ эпизодов...")
             llm_candidates = self._build_enterprise_llm_candidates(asr_data, progress_cb=progress_cb)
 
-        heuristic_candidates = self._build_heuristic_candidates(asr_data)
+        if progress_cb:
+            progress_cb(53, "Post-LLM: эвристический поиск кандидатов...")
+        heuristic_candidates = self._build_heuristic_candidates(
+            asr_data,
+            progress_cb=progress_cb,
+            progress_prefix="Heuristic",
+        )
         if llm_candidates:
             # Не полагаемся только на LLM: домешиваем эвристику,
             # чтобы не получать 1-2 скучных кандидата на всём диапазоне.
             candidates = llm_candidates + heuristic_candidates[:260]
             candidates.sort(key=lambda x: x.score, reverse=True)
-            candidates = self._deduplicate(candidates)
+            if progress_cb:
+                progress_cb(53, "Post-LLM: дедупликация объединённого пула...")
+            candidates = self._deduplicate(candidates, progress_cb=progress_cb, progress_prefix="Post-LLM dedup")
         else:
             candidates = heuristic_candidates
 
         # Если после всех фильтров кандидатов всё ещё мало,
         # делаем расширенный проход с более мягкими порогами.
         if len(candidates) < self.min_candidates:
-            expanded = self._build_heuristic_candidates(asr_data, relaxed=True)
-            candidates = self._deduplicate((candidates + expanded) if candidates else expanded)
+            expanded = self._build_heuristic_candidates(
+                asr_data,
+                relaxed=True,
+                progress_cb=progress_cb,
+                progress_prefix="Heuristic relaxed",
+            )
+            if progress_cb:
+                progress_cb(54, "Post-LLM: дедупликация expanded-пула...")
+            candidates = self._deduplicate(
+                (candidates + expanded) if candidates else expanded,
+                progress_cb=progress_cb,
+                progress_prefix="Expanded dedup",
+            )
             candidates.sort(key=lambda x: x.score, reverse=True)
 
         if progress_cb:
@@ -129,9 +148,15 @@ class ShortsProcessor:
         pre_precision_candidates = list(candidates)
 
         # Pass-2 (precision): локально ужесточаем качество до LLM rerank.
+        if progress_cb:
+            progress_cb(58, "Post-LLM: precision pass...")
         candidates = self._precision_pass(candidates)
 
+        if progress_cb:
+            progress_cb(64, "Post-LLM: LLM rerank...")
         reranked = self._try_llm_rerank(candidates)
+        if progress_cb:
+            progress_cb(70, "Post-LLM: diversify timeline...")
         reranked = self._diversify_by_timeline(reranked)
 
         interested_filtered = self._apply_interest_threshold(reranked)
@@ -155,6 +180,8 @@ class ShortsProcessor:
             reranked = mixed
 
         if self.auto_filter_weak_candidates:
+            if progress_cb:
+                progress_cb(76, "Post-LLM: авто-фильтр слабых кандидатов...")
             weak_filtered = self._auto_filter_weak_candidates(reranked)
             min_safe = max(3, int(self.min_candidates * 0.55))
             if len(weak_filtered) >= min_safe:
@@ -377,8 +404,17 @@ class ShortsProcessor:
                 p = 12 + int((i / max(1, len(packets))) * 36)
                 progress_cb(min(52, p), f"AI Enterprise: пакет {i}/{len(packets)}")
 
+        if progress_cb:
+            progress_cb(52, f"AI Enterprise: обработка пакетов завершена, сырых AI-кандидатов: {len(all_candidates)}")
+
         all_candidates.sort(key=lambda x: x.score, reverse=True)
-        return self._deduplicate(all_candidates)
+        if not all_candidates:
+            if progress_cb:
+                progress_cb(53, "Post-LLM: AI-пул пуст, переключение на эвристику...")
+            return []
+        if progress_cb:
+            progress_cb(53, f"Post-LLM: дедупликация AI-пула ({len(all_candidates)} шт)...")
+        return self._deduplicate(all_candidates, progress_cb=progress_cb, progress_prefix="AI pool dedup")
 
     @staticmethod
     def _build_segment_packets(segments: List, packet_size: int, overlap: int) -> List[Tuple[int, int, List]]:
@@ -542,7 +578,13 @@ class ShortsProcessor:
 
         return result
 
-    def _build_heuristic_candidates(self, asr_data: ASRData, relaxed: bool = False) -> List[ShortCandidate]:
+    def _build_heuristic_candidates(
+        self,
+        asr_data: ASRData,
+        relaxed: bool = False,
+        progress_cb: Optional[Callable] = None,
+        progress_prefix: str = "Heuristic",
+    ) -> List[ShortCandidate]:
         segments = [s for s in asr_data.segments if s.text and s.text.strip()]
         if not segments:
             return []
@@ -569,7 +611,13 @@ class ShortsProcessor:
 
         windows: List[ShortCandidate] = []
         n_prepared = len(prepared)
-        if n_prepared > 900:
+        if n_prepared > 12000:
+            start_step = 5
+        elif n_prepared > 7000:
+            start_step = 4
+        elif n_prepared > 3000:
+            start_step = 3
+        elif n_prepared > 900:
             start_step = 2
         else:
             start_step = 1
@@ -577,7 +625,17 @@ class ShortsProcessor:
         if relaxed:
             start_step = max(1, start_step - 1)
 
+        total_steps = max(1, (n_prepared + start_step - 1) // start_step)
+        step_idx = 0
+        max_outer_steps = 4200 if not relaxed else 2600
         for i in range(0, n_prepared, start_step):
+            step_idx += 1
+            if step_idx > max_outer_steps:
+                if progress_cb:
+                    progress_cb(54, f"{progress_prefix}: safety-stop {step_idx}/{total_steps}")
+                break
+            if progress_cb and (step_idx == 1 or step_idx % 30 == 0):
+                progress_cb(54, f"{progress_prefix}: {step_idx}/{total_steps}")
             start = prepared[i]["seg"].start_time
             text_parts = []
             end = start
@@ -588,10 +646,11 @@ class ShortsProcessor:
             filler_sum = 0
             prev_end = start
 
+            local_budget = 84 if n_prepared > 10000 else (120 if n_prepared > 4000 else 180)
             for j in range(i, len(prepared)):
                 rec = prepared[j]
                 seg = rec["seg"]
-                if j - i > 180:
+                if j - i > local_budget:
                     break
                 end = seg.end_time
                 text_parts.append(rec["text"])
@@ -944,29 +1003,47 @@ class ShortsProcessor:
             logger.warning(f"LLM rerank skipped: {e}")
             return candidates
 
-    def _deduplicate(self, candidates: List[ShortCandidate]) -> List[ShortCandidate]:
+    def _deduplicate(
+        self,
+        candidates: List[ShortCandidate],
+        progress_cb: Optional[Callable] = None,
+        progress_prefix: str = "Dedup",
+    ) -> List[ShortCandidate]:
         accepted: List[ShortCandidate] = []
+        # Критично для длинных стримов: полный O(n^2) по всем accepted
+        # может зависать после "пакет N/N". Храним предрасчитанные признаки
+        # и сравниваем только с ограниченным числом последних принятых.
+        accepted_meta: List[Tuple[set, set, int, int]] = []  # (tokens, ngrams, bucket, mid)
+        compare_tail = 220
         sim_strong = self.repeat_similarity_threshold
         sim_near = min(0.98, sim_strong + 0.14)
-        for c in candidates:
+        total = max(1, len(candidates))
+        last_emit_idx = -1
+        for idx, c in enumerate(candidates):
+            if progress_cb:
+                # heartbeat, чтобы видеть живой прогресс даже на тяжёлом дедупе
+                step = idx // 25
+                if step != last_emit_idx:
+                    last_emit_idx = step
+                    progress_cb(53, f"{progress_prefix}: {idx + 1}/{total}")
             overlap = False
             c_text = f"{c.title} {c.excerpt}".strip()
             c_tokens = self._token_set(c_text)
             c_ngrams = self._char_ngram_set(c_text)
             c_bucket = int(c.start_ms // 20000)
             c_mid = int((c.start_ms + c.end_ms) / 2)
-            for a in accepted:
+            start_idx = max(0, len(accepted) - compare_tail)
+            for i in range(start_idx, len(accepted)):
+                a = accepted[i]
+                a_tokens, a_ngrams, a_bucket, a_mid = accepted_meta[i]
                 inter = max(0, min(c.end_ms, a.end_ms) - max(c.start_ms, a.start_ms))
                 short = max(1, min(c.duration_ms, a.duration_ms))
                 long = max(1, max(c.duration_ms, a.duration_ms))
                 iou = inter / max(1, (c.duration_ms + a.duration_ms - inter))
                 temporal_close = abs(c.start_ms - a.start_ms) < 3500 or abs(c.end_ms - a.end_ms) < 3500
-                a_text = f"{a.title} {a.excerpt}".strip()
-                a_tokens = self._token_set(a_text)
-                a_ngrams = self._char_ngram_set(a_text)
                 text_sim = max(self._jaccard(c_tokens, a_tokens), self._jaccard(c_ngrams, a_ngrams))
-                mid_close = abs(c_mid - int((a.start_ms + a.end_ms) / 2)) < 18000
-                same_bucket = c_bucket == int(a.start_ms // 20000)
+                mid_close = abs(c_mid - a_mid) < 18000
+                same_bucket = c_bucket == a_bucket
 
                 if inter / short > 0.72:
                     overlap = True
@@ -987,6 +1064,7 @@ class ShortsProcessor:
                     break
             if not overlap:
                 accepted.append(c)
+                accepted_meta.append((c_tokens, c_ngrams, c_bucket, c_mid))
         return accepted
 
     @staticmethod

@@ -387,12 +387,26 @@ class CandidateTimelineWidget(QWidget):
         self.setMinimumHeight(74)
         self.duration_ms = 1
         self.items: List[Dict] = []
+        self._paint_items: List[Dict] = []
         self.selected_index = -1
 
     def set_data(self, duration_ms: int, items: List[Dict], selected_index: int = -1):
         self.duration_ms = max(1, int(duration_ms or 1))
         self.items = list(items or [])
         self.selected_index = int(selected_index)
+        # Оптимизация: при очень больших списках рисуем сэмпл для предпросмотра,
+        # а исходный список оставляем для логики выбора.
+        max_paint_items = 900
+        if len(self.items) <= max_paint_items:
+            self._paint_items = self.items
+        else:
+            step = max(1, len(self.items) // max_paint_items)
+            sampled = self.items[::step]
+            if self.selected_index >= 0 and self.selected_index < len(self.items):
+                selected_item = self.items[self.selected_index]
+                if selected_item not in sampled:
+                    sampled.append(selected_item)
+            self._paint_items = sampled
         self.update()
 
     def _track_rect(self) -> QRect:
@@ -411,14 +425,20 @@ class CandidateTimelineWidget(QWidget):
         p.setBrush(QColor(120, 120, 120, 60))
         p.drawRoundedRect(tr, 5, 5)
 
-        for idx, it in enumerate(self.items):
+        for it in self._paint_items:
             st = max(0, int(it.get("start_ms", 0) or 0))
             ed = max(st + 1, int(it.get("end_ms", st + 1) or (st + 1)))
             x1 = self._x_from_ms(st)
             x2 = self._x_from_ms(ed)
             w = max(3, x2 - x1)
             r = QRect(x1, tr.y() + 5, w, tr.height() - 10)
-            is_selected = idx == self.selected_index
+            is_selected = False
+            if 0 <= self.selected_index < len(self.items):
+                sel = self.items[self.selected_index]
+                is_selected = (
+                    int(sel.get("start_ms", 0) or 0) == st
+                    and int(sel.get("end_ms", st + 1) or (st + 1)) == ed
+                )
             color = QColor(59, 130, 246, 220) if is_selected else QColor(16, 185, 129, 170)
             p.setBrush(color)
             p.drawRoundedRect(r, 4, 4)
@@ -506,6 +526,15 @@ class AutoShortsInterface(QWidget):
         self._selected_candidate_row: int = -1
         self._preview_thread = None
         self._preview_in_progress = False
+        self._table_fill_timer = QTimer(self)
+        self._table_fill_timer.setSingleShot(True)
+        self._table_fill_timer.timeout.connect(self._fill_table_chunk)
+        self._table_fill_candidates: List[Dict] = []
+        self._table_fill_row = 0
+        self._table_fill_batch = 120
+        self._table_fill_fg = QColor("#FFFFFF")
+        self._table_fill_bg_even = QColor("#222222")
+        self._table_fill_bg_odd = QColor("#2A2A2A")
 
         self._fx_preview_timer = QTimer(self)
         self._fx_preview_timer.setSingleShot(True)
@@ -1185,6 +1214,7 @@ class AutoShortsInterface(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(64)
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self._on_candidate_table_selection_changed)
+        self.table.itemChanged.connect(self._on_candidate_table_item_changed)
         stage3_layout.addWidget(self.table)
 
         self.candidate_timeline = CandidateTimelineWidget(self)
@@ -2024,36 +2054,96 @@ class AutoShortsInterface(QWidget):
         if self._autonomous_run:
             self._start_render(autonomous=True)
 
+    @staticmethod
+    def _compact_info_text(text: str, max_len: int = 420) -> str:
+        raw = str(text or "").strip()
+        if len(raw) <= max_len:
+            return raw
+        return raw[: max(0, max_len - 1)].rstrip() + "…"
+
+    def _apply_candidate_table_column_widths(self):
+        # Важно: не используем resizeColumnsToContents() на больших таблицах —
+        # это резко тормозит UI из-за дорогостоящего перерасчёта ширин по всем ячейкам.
+        widths = {
+            0: 64,
+            1: 145,
+            2: 90,
+            3: 82,
+            4: 74,
+            5: 74,
+            6: 64,
+            7: 68,
+            8: 68,
+            9: 230,
+            10: 260,
+            11: 520,
+        }
+        for col, w in widths.items():
+            self.table.setColumnWidth(col, w)
+
     def _fill_table(self, candidates: List[Dict]):
+        # Порционное заполнение таблицы: убирает долгий фриз на тысячах строк.
         self.table.setSortingEnabled(False)
+        self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(0)
+
         p = get_theme_palette()
         dark = bool(p.get("is_dark"))
         fg = QColor(p["text"])
         bg_even = QColor(p["card_bg"])
         bg_odd = QColor("#252526" if dark else "#F7F7F7")
-        for row, c in enumerate(candidates):
-            self.table.insertRow(row)
-            cb = CheckBox("", self)
-            cb.setChecked(True)
-            self.table.setCellWidget(row, 0, cb)
 
-            trim_cb = CheckBox("", self)
-            trim_cb.setChecked(bool(c.get("trim_non_speech", True)))
-            trim_cb.stateChanged.connect(lambda _v, r=row: self._on_table_trim_changed(r))
-            self.table.setCellWidget(row, 2, trim_cb)
+        total = len(candidates or [])
+        self.table.setRowCount(total)
+        self._table_fill_candidates = list(candidates or [])
+        self._table_fill_row = 0
+        self._table_fill_fg = fg
+        self._table_fill_bg_even = bg_even
+        self._table_fill_bg_odd = bg_odd
+
+        self._apply_candidate_table_column_widths()
+        # Разблокируем UI до фонового (по таймеру) заполнения.
+        self.table.setUpdatesEnabled(True)
+        self.table.blockSignals(False)
+        self._table_fill_timer.start(0)
+
+    def _fill_table_chunk(self):
+        if not self._table_fill_candidates:
+            return
+
+        end_row = min(len(self._table_fill_candidates), self._table_fill_row + self._table_fill_batch)
+        self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
+
+        for row in range(self._table_fill_row, end_row):
+            c = self._table_fill_candidates[row]
+            select_item = QTableWidgetItem("")
+            select_item.setFlags(
+                select_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            )
+            select_item.setCheckState(Qt.Checked)
+            self.table.setItem(row, 0, select_item)
+
+            trim_item = QTableWidgetItem("")
+            trim_item.setFlags(
+                trim_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            )
+            trim_item.setCheckState(Qt.Checked if bool(c.get("trim_non_speech", True)) else Qt.Unchecked)
+            self.table.setItem(row, 2, trim_item)
 
             start_ms = int(c.get("manual_start_ms", c.get("start_ms", 0)) or 0)
             end_ms = int(c.get("manual_end_ms", c.get("end_ms", 0)) or 0)
             start_s = int(start_ms // 1000)
             end_s = int(end_ms // 1000)
             timerange = f"{self._fmt_s(start_s)} - {self._fmt_s(end_s)}"
-            duration = f"{max(0, end_ms - start_ms) / 1000:.1f}с"
+            duration_ms = max(0, end_ms - start_ms)
+            duration = f"{duration_ms / 1000:.1f}с"
 
             timerange_item = SortableTableWidgetItem(timerange, start_ms)
             timerange_item.setData(Qt.UserRole, int(row))
             self.table.setItem(row, 1, timerange_item)
-            self.table.setItem(row, 3, SortableTableWidgetItem(duration, max(0, end_ms - start_ms)))
+            self.table.setItem(row, 3, SortableTableWidgetItem(duration, duration_ms))
 
             score_v = float(c.get("score", 0.0) or 0.0)
             quality_v = float(c.get("quality_score", 0.0) or 0.0)
@@ -2067,6 +2157,7 @@ class AutoShortsInterface(QWidget):
             self.table.setItem(row, 8, SortableTableWidgetItem(str(c.get("pause_ratio", "")), pause_v))
             self.table.setItem(row, 9, QTableWidgetItem(str(c.get("title", ""))))
             self.table.setItem(row, 10, QTableWidgetItem(str(c.get("viral_title", ""))))
+
             info_text = str(c.get("reason", ""))
             excerpt = str(c.get("excerpt", ""))
             tags = c.get("explainability_tags") or []
@@ -2074,18 +2165,30 @@ class AutoShortsInterface(QWidget):
                 info_text = f"{info_text}\nТеги: {', '.join(str(t) for t in tags)}"
             if excerpt:
                 info_text = f"{info_text}\n{excerpt}"
-            self.table.setItem(row, 11, QTableWidgetItem(info_text))
 
-            row_bg = bg_even if row % 2 == 0 else bg_odd
+            compact_info = self._compact_info_text(info_text)
+            info_item = QTableWidgetItem(compact_info)
+            if compact_info != info_text:
+                info_item.setToolTip(info_text)
+            self.table.setItem(row, 11, info_item)
+
+            row_bg = self._table_fill_bg_even if row % 2 == 0 else self._table_fill_bg_odd
             for col in range(1, self.table.columnCount()):
                 item = self.table.item(row, col)
                 if item:
-                    item.setForeground(fg)
+                    item.setForeground(self._table_fill_fg)
                     item.setBackground(row_bg)
 
-        self.table.resizeColumnsToContents()
-        self.table.setColumnWidth(11, max(420, self.table.columnWidth(11)))
+        self.table.setUpdatesEnabled(True)
+        self.table.blockSignals(False)
+        self._table_fill_row = end_row
+
+        if self._table_fill_row < len(self._table_fill_candidates):
+            self._table_fill_timer.start(0)
+            return
+
         self.table.setSortingEnabled(True)
+        self._table_fill_candidates = []
         self._refresh_candidate_timeline()
 
     def _apply_candidates_table_tooltips(self):
@@ -2111,8 +2214,8 @@ class AutoShortsInterface(QWidget):
     def _collect_selected(self) -> List[Dict]:
         selected = []
         for row in range(self.table.rowCount()):
-            cb = self.table.cellWidget(row, 0)
-            if not (cb and cb.isChecked()):
+            select_item = self.table.item(row, 0)
+            if not (select_item and select_item.checkState() == Qt.Checked):
                 continue
             idx_item = self.table.item(row, 1)
             try:
@@ -2231,11 +2334,11 @@ class AutoShortsInterface(QWidget):
         if dur_item:
             dur_item.setText(duration)
 
-        trim_cb = self.table.cellWidget(row, 2)
-        if trim_cb:
-            trim_cb.blockSignals(True)
-            trim_cb.setChecked(bool(c.get("trim_non_speech", True)))
-            trim_cb.blockSignals(False)
+        trim_item = self.table.item(row, 2)
+        if trim_item:
+            old_block = self.table.blockSignals(True)
+            trim_item.setCheckState(Qt.Checked if bool(c.get("trim_non_speech", True)) else Qt.Unchecked)
+            self.table.blockSignals(old_block)
 
     def _on_table_trim_changed(self, row: int):
         if not (0 <= row < self.table.rowCount()):
@@ -2244,12 +2347,20 @@ class AutoShortsInterface(QWidget):
         src_idx = int(idx_item.data(Qt.UserRole)) if idx_item else row
         if not (0 <= src_idx < len(self.candidates)):
             return
-        cb = self.table.cellWidget(row, 2)
-        self.candidates[src_idx]["trim_non_speech"] = bool(cb.isChecked()) if cb else True
+        trim_item = self.table.item(row, 2)
+        self.candidates[src_idx]["trim_non_speech"] = bool(
+            trim_item and trim_item.checkState() == Qt.Checked
+        )
         if src_idx == self._selected_candidate_row:
             self.cand_trim_speech_check.blockSignals(True)
             self.cand_trim_speech_check.setChecked(bool(self.candidates[src_idx].get("trim_non_speech", True)))
             self.cand_trim_speech_check.blockSignals(False)
+
+    def _on_candidate_table_item_changed(self, item: QTableWidgetItem):
+        if not item:
+            return
+        if item.column() == 2:
+            self._on_table_trim_changed(item.row())
 
     def _preview_selected_candidate(self):
         from app.thread.auto_shorts_thread import AutoShortsSinglePreviewThread
@@ -3596,15 +3707,15 @@ class AutoShortsInterface(QWidget):
 
     def _select_all(self):
         for row in range(self.table.rowCount()):
-            cb = self.table.cellWidget(row, 0)
-            if cb:
-                cb.setChecked(True)
+            item = self.table.item(row, 0)
+            if item:
+                item.setCheckState(Qt.Checked)
 
     def _clear_select(self):
         for row in range(self.table.rowCount()):
-            cb = self.table.cellWidget(row, 0)
-            if cb:
-                cb.setChecked(False)
+            item = self.table.item(row, 0)
+            if item:
+                item.setCheckState(Qt.Unchecked)
 
     def _stop_render(self):
         if hasattr(self, "render_thread") and self.render_thread and self.render_thread.isRunning():
