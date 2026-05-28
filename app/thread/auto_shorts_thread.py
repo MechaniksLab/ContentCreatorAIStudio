@@ -34,12 +34,14 @@ class AutoShortsTranscribeThread(QThread):
         range_enabled: bool = False,
         range_start_s: int = 0,
         range_end_s: int = 0,
+        selected_asr_cache_key: str = "",
     ):
         super().__init__()
         self.video_path = video_path
         self.range_enabled = bool(range_enabled)
         self.range_start_s = max(0, int(range_start_s or 0))
         self.range_end_s = max(0, int(range_end_s or 0))
+        self.selected_asr_cache_key = str(selected_asr_cache_key or "").strip()
 
     def run(self):
         temp_wav = None
@@ -60,7 +62,7 @@ class AutoShortsTranscribeThread(QThread):
             )
 
             source_offset_ms = int(self.range_start_s * 1000) if (self.range_enabled and self.range_end_s > self.range_start_s) else 0
-            asr_data = self._load_asr_cache(cache_key)
+            asr_data = self._load_asr_cache(self.selected_asr_cache_key or cache_key)
             if asr_data is not None:
                 self.progress.emit(8, "ASR кеш: найдено, Whisper пропущен")
                 self.progress.emit(100, "Whisper завершён (из кеша). Можно запускать отбор кандидатов")
@@ -70,6 +72,7 @@ class AutoShortsTranscribeThread(QThread):
                         "source_offset_ms": int(source_offset_ms),
                         "range_start_s": int(self.range_start_s),
                         "range_end_s": int(self.range_end_s),
+                        "video_path": str(self.video_path),
                     }
                 )
                 return
@@ -100,6 +103,7 @@ class AutoShortsTranscribeThread(QThread):
                     "source_offset_ms": int(source_offset_ms),
                     "range_start_s": int(self.range_start_s),
                     "range_end_s": int(self.range_end_s),
+                    "video_path": str(self.video_path),
                 }
             )
         except Exception as e:
@@ -185,13 +189,107 @@ class AutoShortsTranscribeThread(QThread):
     def _save_asr_cache(self, cache_key: str, asr_data):
         path = self._asr_cache_dir() / f"{cache_key}.json"
         try:
+            vh = self._video_hash(self.video_path)
+            has_range = bool(self.range_enabled and self.range_end_s > self.range_start_s)
+            range_start_s = int(self.range_start_s if has_range else 0)
+            range_end_s = int(self.range_end_s if has_range else 0)
             payload = {
                 "version": 1,
+                "video_hash": vh,
+                "video_path": str(self.video_path),
+                # Абсолютный диапазон исходного видео, выбранный пользователем.
+                # Нужен для корректного восстановления ползунка времени при выборе кэша.
+                "range_start_s": range_start_s,
+                "range_end_s": range_end_s,
                 "asr": asr_data.to_json(),
             }
             path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             logger.warning("AutoShorts ASR cache write failed: %s", e)
+
+    @staticmethod
+    def _video_hash(video_path: str) -> str:
+        vp = Path(video_path)
+        try:
+            st = vp.stat()
+            sig = f"{vp.resolve()}|{int(st.st_size)}|{int(st.st_mtime)}"
+        except Exception:
+            sig = str(vp)
+        return hashlib.sha1(sig.encode("utf-8", errors="ignore")).hexdigest()
+
+    @staticmethod
+    def _norm_video_path(video_path: str) -> str:
+        try:
+            return str(Path(video_path).resolve()).strip().lower()
+        except Exception:
+            return str(video_path or "").strip().lower()
+
+    @classmethod
+    def list_asr_caches_for_video(cls, video_path: str) -> List[Dict]:
+        out: List[Dict] = []
+        legacy_out: List[Dict] = []
+        vhash = cls._video_hash(video_path)
+        vpath = cls._norm_video_path(video_path)
+        for p in sorted(cls._asr_cache_dir().glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                cache_hash = str(data.get("video_hash", ""))
+                cache_path = cls._norm_video_path(str(data.get("video_path", "") or ""))
+                has_binding = bool(cache_hash or cache_path)
+                asr = data.get("asr") or {}
+                cache_range_start_s = int(data.get("range_start_s", 0) or 0)
+                cache_range_end_s = int(data.get("range_end_s", 0) or 0)
+                starts, ends = [], []
+                for k, row in (asr.items() if isinstance(asr, dict) else []):
+                    if not str(k).isdigit() or not isinstance(row, dict):
+                        continue
+                    starts.append(int(row.get("start_time", 0) or 0))
+                    ends.append(int(row.get("end_time", 0) or 0))
+                if cache_range_end_s > cache_range_start_s:
+                    s_ms, e_ms = int(cache_range_start_s * 1000), int(cache_range_end_s * 1000)
+                elif starts and ends:
+                    s_ms, e_ms = min(starts), max(ends)
+                else:
+                    s_ms, e_ms = 0, 0
+                item = {"key": p.stem, "start_ms": int(s_ms), "end_ms": int(e_ms), "mtime": int(p.stat().st_mtime)}
+                # Совместимость: современные кэши фильтруем по hash/path,
+                # а совсем старые (без привязки к видео) держим как legacy fallback.
+                if has_binding:
+                    if cache_hash == vhash or (cache_path and cache_path == vpath):
+                        out.append(item)
+                else:
+                    legacy_out.append(item)
+            except Exception:
+                continue
+        # Если не нашлось ни одного кэша с привязкой к видео, показываем legacy,
+        # чтобы пользователь мог выбрать старые сохранения и мигрировать их.
+        return out if out else legacy_out
+
+    @classmethod
+    def list_all_asr_caches(cls) -> List[Dict]:
+        out: List[Dict] = []
+        for p in sorted(cls._asr_cache_dir().glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                asr = data.get("asr") or {}
+                cache_range_start_s = int(data.get("range_start_s", 0) or 0)
+                cache_range_end_s = int(data.get("range_end_s", 0) or 0)
+                starts, ends = [], []
+                for k, row in (asr.items() if isinstance(asr, dict) else []):
+                    if not str(k).isdigit() or not isinstance(row, dict):
+                        continue
+                    starts.append(int(row.get("start_time", 0) or 0))
+                    ends.append(int(row.get("end_time", 0) or 0))
+                if cache_range_end_s > cache_range_start_s:
+                    s_ms, e_ms = int(cache_range_start_s * 1000), int(cache_range_end_s * 1000)
+                elif starts and ends:
+                    s_ms, e_ms = min(starts), max(ends)
+                else:
+                    s_ms, e_ms = 0, 0
+                out.append({"key": p.stem, "start_ms": int(s_ms), "end_ms": int(e_ms), "mtime": int(p.stat().st_mtime)})
+            except Exception:
+                continue
+        return out
 
     @staticmethod
     def _extract_audio_segment(input_video: str, output_wav: str, start_s: int, end_s: int):
@@ -300,7 +398,14 @@ class AutoShortsCandidateThread(QThread):
         auto_filter_profile: str = "balanced",
         interest_threshold_percent: int = 52,
         llm_search_intensity: int = 3,
+        semantic_stitch_enabled: bool = False,
+        semantic_stitch_profile: str = "balanced",
+        topic_timeline_profile: str = "balanced",
+        semantic_bridge_max_gap_s: int = 90,
+        semantic_llm_interruptions_mode: bool = False,
+        semantic_coherence_check_enabled: bool = False,
         use_candidates_cache: bool = True,
+        selected_candidates_cache_key: str = "",
     ):
         super().__init__()
         self.asr_payload = asr_payload or {}
@@ -314,7 +419,16 @@ class AutoShortsCandidateThread(QThread):
         self.auto_filter_profile = profile if profile in {"soft", "balanced", "strict"} else "balanced"
         self.interest_threshold_percent = max(30, min(95, int(interest_threshold_percent or 52)))
         self.llm_search_intensity = max(1, min(5, int(llm_search_intensity or 3)))
+        self.semantic_stitch_enabled = bool(semantic_stitch_enabled)
+        sem_profile = str(semantic_stitch_profile or "balanced").strip().lower()
+        self.semantic_stitch_profile = sem_profile if sem_profile in {"soft", "balanced", "strict"} else "balanced"
+        topic_profile = str(topic_timeline_profile or "balanced").strip().lower()
+        self.topic_timeline_profile = topic_profile if topic_profile in {"soft", "balanced", "strict"} else "balanced"
+        self.semantic_bridge_max_gap_s = max(10, min(600, int(semantic_bridge_max_gap_s or 90)))
+        self.semantic_llm_interruptions_mode = bool(semantic_llm_interruptions_mode)
+        self.semantic_coherence_check_enabled = bool(semantic_coherence_check_enabled)
         self.use_candidates_cache = bool(use_candidates_cache)
+        self.selected_candidates_cache_key = str(selected_candidates_cache_key or "").strip()
 
     def run(self):
         try:
@@ -325,7 +439,7 @@ class AutoShortsCandidateThread(QThread):
             llm_cfg = AutoShortsTranscribeThread._resolve_llm_config()
             cache_key = self._build_candidates_cache_key(asr_json, llm_cfg=llm_cfg)
             if self.use_candidates_cache:
-                cached = self._load_candidates_cache(cache_key)
+                cached = self._load_candidates_cache(self.selected_candidates_cache_key or cache_key)
                 # Совместимость: если строгий ключ не совпал (например, из-за смены
                 # LLM URL/модели или новых полей в ключе), пробуем более мягкий ключ.
                 if cached is None:
@@ -358,6 +472,12 @@ class AutoShortsCandidateThread(QThread):
                 auto_filter_profile=self.auto_filter_profile,
                 interest_threshold_percent=self.interest_threshold_percent,
                 llm_search_intensity=self.llm_search_intensity,
+                semantic_stitch_enabled=self.semantic_stitch_enabled,
+                semantic_stitch_profile=self.semantic_stitch_profile,
+                topic_timeline_profile=self.topic_timeline_profile,
+                semantic_bridge_max_gap_s=self.semantic_bridge_max_gap_s,
+                semantic_llm_interruptions_mode=self.semantic_llm_interruptions_mode,
+                semantic_coherence_check_enabled=self.semantic_coherence_check_enabled,
             )
 
             candidates = processor.find_candidates(
@@ -420,7 +540,7 @@ class AutoShortsCandidateThread(QThread):
     def _build_candidates_cache_key(self, asr_json: Dict, llm_cfg: Dict[str, str] | None = None) -> str:
         llm_cfg = dict(llm_cfg or {})
         payload = {
-            "v": 2,
+            "v": 3,
             "asr": asr_json,
             "source_offset_ms": int(self.asr_payload.get("source_offset_ms", 0) or 0),
             "min_duration_s": int(self.min_duration_s),
@@ -432,6 +552,11 @@ class AutoShortsCandidateThread(QThread):
             "auto_filter_profile": str(self.auto_filter_profile),
             "interest_threshold_percent": int(self.interest_threshold_percent),
             "llm_search_intensity": int(self.llm_search_intensity),
+            "semantic_stitch_enabled": bool(self.semantic_stitch_enabled),
+            "semantic_stitch_profile": str(self.semantic_stitch_profile),
+            "topic_timeline_profile": str(self.topic_timeline_profile),
+            "semantic_bridge_max_gap_s": int(self.semantic_bridge_max_gap_s),
+            "semantic_llm_interruptions_mode": bool(self.semantic_llm_interruptions_mode),
             "llm_service": str(cfg.llm_service.value),
             "llm_model": str(llm_cfg.get("model", "") or ""),
             "llm_base_url": str(llm_cfg.get("base_url", "") or ""),
@@ -477,13 +602,47 @@ class AutoShortsCandidateThread(QThread):
     def _save_candidates_cache(self, cache_key: str, candidates: List[Dict]):
         path = self._candidate_cache_dir() / f"{cache_key}.json"
         try:
+            asr_json = self.asr_payload.get("asr_json") if isinstance(self.asr_payload, dict) else None
+            asr_fingerprint = ""
+            try:
+                if asr_json:
+                    asr_fingerprint = hashlib.sha1(
+                        json.dumps(asr_json, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+                    ).hexdigest()
+            except Exception:
+                asr_fingerprint = ""
             payload = {
                 "version": 1,
+                "video_hash": AutoShortsTranscribeThread._video_hash(str(self.asr_payload.get("video_path", "") or "")),
+                "video_path": str(self.asr_payload.get("video_path", "") or ""),
+                "asr_fingerprint": asr_fingerprint,
                 "candidates": candidates,
             }
             path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             logger.warning("AutoShorts candidates cache write failed: %s", e)
+
+    @classmethod
+    def list_candidate_caches_for_video(cls, video_path: str, asr_fingerprint: str = "") -> List[Dict]:
+        out: List[Dict] = []
+        vhash = AutoShortsTranscribeThread._video_hash(video_path)
+        vpath = AutoShortsTranscribeThread._norm_video_path(video_path)
+        target_asr_fp = str(asr_fingerprint or "").strip()
+        for p in sorted(cls._candidate_cache_dir().glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                cache_hash = str(data.get("video_hash", ""))
+                cache_path = AutoShortsTranscribeThread._norm_video_path(str(data.get("video_path", "") or ""))
+                if cache_hash != vhash and (not cache_path or cache_path != vpath):
+                    continue
+                if target_asr_fp:
+                    if str(data.get("asr_fingerprint", "")).strip() != target_asr_fp:
+                        continue
+                cnt = len(data.get("candidates") or [])
+                out.append({"key": p.stem, "count": int(cnt), "mtime": int(p.stat().st_mtime)})
+            except Exception:
+                continue
+        return out
 
 
 class AutoShortsRenderThread(QThread):

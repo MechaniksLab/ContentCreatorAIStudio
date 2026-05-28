@@ -398,6 +398,30 @@ class Config(QConfig):
     auto_shorts_use_candidates_cache = ConfigItem(
         "MainWindow", "AutoShortsUseCandidatesCache", True, BoolValidator()
     )
+    auto_shorts_semantic_stitch_enabled = ConfigItem(
+        "MainWindow", "AutoShortsSemanticStitchEnabled", False, BoolValidator()
+    )
+    auto_shorts_semantic_stitch_profile = OptionsConfigItem(
+        "MainWindow",
+        "AutoShortsSemanticStitchProfile",
+        "balanced",
+        OptionsValidator(["soft", "balanced", "strict"]),
+    )
+    auto_shorts_topic_timeline_profile = OptionsConfigItem(
+        "MainWindow",
+        "AutoShortsTopicTimelineProfile",
+        "balanced",
+        OptionsValidator(["soft", "balanced", "strict"]),
+    )
+    auto_shorts_semantic_bridge_max_gap_s = RangeConfigItem(
+        "MainWindow", "AutoShortsSemanticBridgeMaxGapS", 90, RangeValidator(10, 600)
+    )
+    auto_shorts_semantic_llm_interruptions_mode = ConfigItem(
+        "MainWindow", "AutoShortsSemanticLlmInterruptionsMode", False, BoolValidator()
+    )
+    auto_shorts_semantic_coherence_check_enabled = ConfigItem(
+        "MainWindow", "AutoShortsSemanticCoherenceCheckEnabled", False, BoolValidator()
+    )
     highlight_reel_min_duration_s = RangeConfigItem(
         "MainWindow", "HighlightReelMinDurationS", 20, RangeValidator(6, 180)
     )

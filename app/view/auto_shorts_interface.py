@@ -659,10 +659,14 @@ class AutoShortsInterface(QWidget):
         stage1_actions = QHBoxLayout()
         self.transcribe_btn = PrimaryPushButton("1) Запустить Whisper")
         self.transcribe_btn.clicked.connect(self._start_transcribe)
+        self.asr_cache_combo = ComboBox(self)
+        self.asr_cache_combo.addItem("ASR кэш: авто")
+        self.asr_cache_combo.currentIndexChanged.connect(self._on_asr_cache_changed)
         self.autonomous_checkbox = CheckBox("Полностью автономно")
         self.run_all_btn = PushButton("Запустить все этапы подряд")
         self.run_all_btn.clicked.connect(self._start_full_pipeline)
         stage1_actions.addWidget(self.transcribe_btn)
+        stage1_actions.addWidget(self.asr_cache_combo)
         stage1_actions.addWidget(self.autonomous_checkbox)
         stage1_actions.addStretch(1)
         stage1_actions.addWidget(self.run_all_btn)
@@ -791,8 +795,129 @@ class AutoShortsInterface(QWidget):
             lambda _v: cfg.set(cfg.auto_shorts_use_candidates_cache, bool(self.cache_candidates_checkbox.isChecked()))
         )
         filter_row.addWidget(self.cache_candidates_checkbox)
+        self.candidates_cache_combo = ComboBox(self)
+        self.candidates_cache_combo.addItem("Кандидаты кэш: авто")
+        filter_row.addWidget(self.candidates_cache_combo)
         filter_row.addStretch(1)
         stage2_layout.addLayout(filter_row)
+
+        semantic_mode_title = BodyLabel("1.3) Цельные тематические шортсы (LLM-режим)")
+        semantic_mode_title.setToolTip("Отдельный режим: нейросеть связывает продолжения темы через оффтоп и удаляет нерелевантные вставки")
+        stage2_layout.addWidget(semantic_mode_title)
+
+        semantic_row_1 = QHBoxLayout()
+        self.semantic_stitch_enabled_checkbox = CheckBox("Включить режим цельных тематических шортсов")
+        self.semantic_stitch_enabled_checkbox.setChecked(bool(cfg.get(cfg.auto_shorts_semantic_stitch_enabled)))
+        self.semantic_stitch_enabled_checkbox.setToolTip(
+            "Отдельный режим (по галочке): LLM не только ищет моменты,\n"
+            "но и объединяет продолжение темы даже через вставки оффтопа."
+        )
+        self.semantic_stitch_enabled_checkbox.stateChanged.connect(
+            lambda _v: cfg.set(cfg.auto_shorts_semantic_stitch_enabled, bool(self.semantic_stitch_enabled_checkbox.isChecked()))
+        )
+        self.semantic_stitch_enabled_checkbox.stateChanged.connect(
+            lambda _v: self._update_semantic_controls_visibility()
+        )
+        semantic_row_1.addWidget(self.semantic_stitch_enabled_checkbox)
+
+        self.semantic_llm_interruptions_mode_checkbox = CheckBox(
+            "LLM: убирать перебивания/оффтоп других людей внутри темы"
+        )
+        self.semantic_llm_interruptions_mode_checkbox.setChecked(
+            bool(cfg.get(cfg.auto_shorts_semantic_llm_interruptions_mode))
+        )
+        self.semantic_llm_interruptions_mode_checkbox.setToolTip(
+            "Работает только в режиме цельных тематических шортсов.\n"
+            "Передаёт LLM более строгую задачу: вырезать перебивания и\n"
+            "нерелевантные реплики других участников, сохраняя только тему.\n"
+            "Влияет на шаг Topic Timeline (очистка внутри темы) на этапе 2."
+        )
+        self.semantic_llm_interruptions_mode_checkbox.stateChanged.connect(
+            lambda _v: cfg.set(
+                cfg.auto_shorts_semantic_llm_interruptions_mode,
+                bool(self.semantic_llm_interruptions_mode_checkbox.isChecked()),
+            )
+        )
+        semantic_row_1.addWidget(self.semantic_llm_interruptions_mode_checkbox)
+
+        self.semantic_coherence_check_checkbox = CheckBox(
+            "Проверять связность темы после склейки (LLM)",
+        )
+        self.semantic_coherence_check_checkbox.setChecked(
+            bool(cfg.get(cfg.auto_shorts_semantic_coherence_check_enabled))
+        )
+        self.semantic_coherence_check_checkbox.setToolTip(
+            "Дополнительная проверка после semantic-склейки: LLM подтверждает,\n"
+            "что в шортсе сохранён связный ход темы (начало → развитие → продолжение)."
+        )
+        self.semantic_coherence_check_checkbox.stateChanged.connect(
+            lambda _v: cfg.set(
+                cfg.auto_shorts_semantic_coherence_check_enabled,
+                bool(self.semantic_coherence_check_checkbox.isChecked()),
+            )
+        )
+        semantic_row_1.addWidget(self.semantic_coherence_check_checkbox)
+        semantic_row_1.addStretch(1)
+        stage2_layout.addLayout(semantic_row_1)
+
+        semantic_llm_mode_hint = BodyLabel(
+            "ℹ Эта галочка влияет только на Topic Timeline (этап 2)\n"
+            "в режиме цельных тематических шортсов. В обычном режиме логика не меняется."
+        )
+        semantic_llm_mode_hint.setObjectName("semanticLlmHintLabel")
+        semantic_llm_mode_hint.setWordWrap(True)
+        stage2_layout.addWidget(semantic_llm_mode_hint)
+
+        self.semantic_controls_wrap = QWidget(self)
+        semantic_row_2 = QHBoxLayout(self.semantic_controls_wrap)
+        semantic_row_2.setContentsMargins(0, 0, 0, 0)
+        semantic_profile_label = BodyLabel("Профиль semantic-склейки:")
+        semantic_row_2.addWidget(semantic_profile_label)
+        self.semantic_stitch_profile_combo = ComboBox(self)
+        self.semantic_stitch_profile_combo.addItems(["Мягкий", "Сбалансированный", "Строгий"])
+        self.semantic_stitch_profile_combo.setCurrentText("Сбалансированный")
+        self._set_semantic_stitch_profile_value(str(cfg.get(cfg.auto_shorts_semantic_stitch_profile) or "balanced"))
+        self.semantic_stitch_profile_combo.currentTextChanged.connect(
+            lambda _t: cfg.set(cfg.auto_shorts_semantic_stitch_profile, self._semantic_stitch_profile_value())
+        )
+        semantic_row_2.addWidget(self.semantic_stitch_profile_combo)
+
+        topic_timeline_profile_label = BodyLabel("Профиль topic-clean (внутри темы):")
+        topic_timeline_profile_label.setToolTip(
+            "Определяет, насколько строго LLM вырезает оффтоп внутри одного тематического момента."
+        )
+        semantic_row_2.addWidget(topic_timeline_profile_label)
+        self.topic_timeline_profile_combo = ComboBox(self)
+        self.topic_timeline_profile_combo.addItems(["Мягкий", "Сбалансированный", "Строгий"])
+        self.topic_timeline_profile_combo.setCurrentText("Сбалансированный")
+        self._set_topic_timeline_profile_value(str(cfg.get(cfg.auto_shorts_topic_timeline_profile) or "balanced"))
+        self.topic_timeline_profile_combo.currentTextChanged.connect(
+            lambda _t: cfg.set(cfg.auto_shorts_topic_timeline_profile, self._topic_timeline_profile_value())
+        )
+        semantic_row_2.addWidget(self.topic_timeline_profile_combo)
+
+        semantic_gap_label = BodyLabel("Макс. пауза оффтопа между частями темы (сек):")
+        semantic_gap_label.setToolTip(
+            "Это НЕ длительность шортса.\n"
+            "Это максимум оффтоп-паузы между 2 кусками одной и той же темы,\n"
+            "которые LLM может склеить в один шортс.\n"
+            "Если пауза больше — куски считаются разными моментами."
+        )
+        semantic_row_2.addWidget(semantic_gap_label)
+        self.semantic_bridge_max_gap_spin = SpinBox(self)
+        self.semantic_bridge_max_gap_spin.setRange(10, 600)
+        self.semantic_bridge_max_gap_spin.setValue(int(cfg.get(cfg.auto_shorts_semantic_bridge_max_gap_s)))
+        self.semantic_bridge_max_gap_spin.setToolTip(
+            "Лимит паузы оффтопа между частями одной темы для semantic-склейки.\n"
+            "Не влияет на min/max длительность итогового шортса."
+        )
+        self.semantic_bridge_max_gap_spin.valueChanged.connect(
+            lambda v: cfg.set(cfg.auto_shorts_semantic_bridge_max_gap_s, int(v))
+        )
+        semantic_row_2.addWidget(self.semantic_bridge_max_gap_spin)
+        semantic_row_2.addStretch(1)
+        stage2_layout.addWidget(self.semantic_controls_wrap)
+        self._update_semantic_controls_visibility()
 
         filter_profile_row = QHBoxLayout()
         filter_profile_label = BodyLabel("Профиль авто-фильтра:")
@@ -1004,6 +1129,35 @@ class AutoShortsInterface(QWidget):
         template_layout.addLayout(row_tpl_actions)
 
         template_layout.addWidget(BodyLabel("1) На исходном кадре перетяните и растяните области WEBCAM и GAME (кроп)."))
+        source_actions_row = QHBoxLayout()
+        source_actions_row.addStretch(1)
+        self.reset_main_area_9x16_btn = PushButton("Сбросить GAME к 9:16")
+        self.reset_main_area_9x16_btn.setToolTip("Сбросить размер основной области GAME (кроп) к соотношению сторон 9:16")
+        self.reset_main_area_9x16_btn.clicked.connect(self._reset_main_area_to_shorts_ratio)
+        source_actions_row.addWidget(self.reset_main_area_9x16_btn)
+        self.match_main_area_to_output_ratio_btn = PushButton("Подогнать GAME по 2-й зоне")
+        self.match_main_area_to_output_ratio_btn.setToolTip(
+            "Привести соотношение GAME в 1-й зоне к такому же соотношению GAME во 2-й зоне"
+        )
+        self.match_main_area_to_output_ratio_btn.clicked.connect(self._match_source_game_to_output_game_ratio)
+        source_actions_row.addWidget(self.match_main_area_to_output_ratio_btn)
+        self.match_webcam_area_to_output_ratio_btn = PushButton("Подогнать WEBCAM по 2-й зоне")
+        self.match_webcam_area_to_output_ratio_btn.setToolTip(
+            "Привести соотношение WEBCAM в 1-й зоне к такому же соотношению WEBCAM во 2-й зоне"
+        )
+        self.match_webcam_area_to_output_ratio_btn.clicked.connect(self._match_source_webcam_to_output_webcam_ratio)
+        source_actions_row.addWidget(self.match_webcam_area_to_output_ratio_btn)
+        template_layout.addLayout(source_actions_row)
+
+        ratio_info_row = QHBoxLayout()
+        self.game_ratio_indicator = BodyLabel("GAME ratio: 1-я зона — / 2-я зона —")
+        self.webcam_ratio_indicator = BodyLabel("WEBCAM ratio: 1-я зона — / 2-я зона —")
+        ratio_info_row.addWidget(self.game_ratio_indicator)
+        ratio_info_row.addSpacing(14)
+        ratio_info_row.addWidget(self.webcam_ratio_indicator)
+        ratio_info_row.addStretch(1)
+        template_layout.addLayout(ratio_info_row)
+
         self.source_preview = LayerPreviewWidget(1920, 1080, self)
         self.source_preview.set_keep_aspect(True)
         self.source_preview.setMinimumHeight(420)
@@ -1041,6 +1195,7 @@ class AutoShortsInterface(QWidget):
         self.source_preview.changed.connect(lambda _: self._on_layout_changed())
         self.output_preview.changed.connect(lambda _: self._on_layout_changed())
         self._on_webcam_area_toggled()
+        self._update_ratio_indicators()
 
         fx_title_row = QHBoxLayout()
         fx_title = StrongBodyLabel("Цветокоррекция слоёв")
@@ -1543,6 +1698,208 @@ class AutoShortsInterface(QWidget):
 
     def _on_layout_changed(self):
         self._refresh_output_composite_preview()
+        self._update_ratio_indicators()
+
+    def _reset_main_area_to_shorts_ratio(self):
+        if not hasattr(self, "source_preview"):
+            return
+
+        layers = self.source_preview.get_layers()
+        game = layers.get("game") or {}
+        webcam = layers.get("webcam") or {"x": 0, "y": 0, "w": 100, "h": 100}
+
+        x = float(game.get("x", 0) or 0)
+        y = float(game.get("y", 0) or 0)
+        w = max(20.0, float(game.get("w", 20) or 20))
+        h = max(20.0, float(game.get("h", 20) or 20))
+
+        ratio = 9.0 / 16.0
+        canvas_w = float(self.source_preview.canvas_w)
+        canvas_h = float(self.source_preview.canvas_h)
+
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+
+        # Максимально близко к текущему размеру, но строго в 9:16.
+        base_h = min(h, canvas_h)
+        new_h = max(20.0, base_h)
+        new_w = new_h * ratio
+        if new_w > canvas_w:
+            new_w = max(20.0, canvas_w)
+            new_h = new_w / ratio
+
+        new_x = cx - new_w / 2.0
+        new_y = cy - new_h / 2.0
+
+        if new_x < 0:
+            new_x = 0.0
+        if new_y < 0:
+            new_y = 0.0
+        if new_x + new_w > canvas_w:
+            new_x = max(0.0, canvas_w - new_w)
+        if new_y + new_h > canvas_h:
+            new_y = max(0.0, canvas_h - new_h)
+
+        self.source_preview.set_layers(
+            QRectF(
+                float(webcam.get("x", 0) or 0),
+                float(webcam.get("y", 0) or 0),
+                max(20.0, float(webcam.get("w", 20) or 20)),
+                max(20.0, float(webcam.get("h", 20) or 20)),
+            ),
+            QRectF(new_x, new_y, new_w, new_h),
+        )
+        self._refresh_output_composite_preview()
+
+    def _match_source_game_to_output_game_ratio(self):
+        if not hasattr(self, "source_preview") or not hasattr(self, "output_preview"):
+            return
+
+        out_layers = self.output_preview.get_layers()
+        out_game = out_layers.get("game") or {}
+        out_w = max(1.0, float(out_game.get("w", 1) or 1))
+        out_h = max(1.0, float(out_game.get("h", 1) or 1))
+        target_ratio = out_w / out_h
+
+        src_layers = self.source_preview.get_layers()
+        game = src_layers.get("game") or {}
+        webcam = src_layers.get("webcam") or {"x": 0, "y": 0, "w": 100, "h": 100}
+
+        x = float(game.get("x", 0) or 0)
+        y = float(game.get("y", 0) or 0)
+        w = max(20.0, float(game.get("w", 20) or 20))
+        h = max(20.0, float(game.get("h", 20) or 20))
+
+        canvas_w = float(self.source_preview.canvas_w)
+        canvas_h = float(self.source_preview.canvas_h)
+
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+
+        base_h = min(h, canvas_h)
+        new_h = max(20.0, base_h)
+        new_w = new_h * target_ratio
+        if new_w > canvas_w:
+            new_w = max(20.0, canvas_w)
+            new_h = new_w / max(0.01, target_ratio)
+
+        new_x = cx - new_w / 2.0
+        new_y = cy - new_h / 2.0
+
+        if new_x < 0:
+            new_x = 0.0
+        if new_y < 0:
+            new_y = 0.0
+        if new_x + new_w > canvas_w:
+            new_x = max(0.0, canvas_w - new_w)
+        if new_y + new_h > canvas_h:
+            new_y = max(0.0, canvas_h - new_h)
+
+        self.source_preview.set_layers(
+            QRectF(
+                float(webcam.get("x", 0) or 0),
+                float(webcam.get("y", 0) or 0),
+                max(20.0, float(webcam.get("w", 20) or 20)),
+                max(20.0, float(webcam.get("h", 20) or 20)),
+            ),
+            QRectF(new_x, new_y, new_w, new_h),
+        )
+        self._refresh_output_composite_preview()
+
+    def _match_source_webcam_to_output_webcam_ratio(self):
+        if not hasattr(self, "source_preview") or not hasattr(self, "output_preview"):
+            return
+
+        out_layers = self.output_preview.get_layers()
+        out_webcam = out_layers.get("webcam") or {}
+        out_w = max(1.0, float(out_webcam.get("w", 1) or 1))
+        out_h = max(1.0, float(out_webcam.get("h", 1) or 1))
+        target_ratio = out_w / out_h
+
+        src_layers = self.source_preview.get_layers()
+        webcam = src_layers.get("webcam") or {}
+        game = src_layers.get("game") or {"x": 0, "y": 0, "w": 100, "h": 100}
+
+        x = float(webcam.get("x", 0) or 0)
+        y = float(webcam.get("y", 0) or 0)
+        w = max(20.0, float(webcam.get("w", 20) or 20))
+        h = max(20.0, float(webcam.get("h", 20) or 20))
+
+        canvas_w = float(self.source_preview.canvas_w)
+        canvas_h = float(self.source_preview.canvas_h)
+
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+
+        base_h = min(h, canvas_h)
+        new_h = max(20.0, base_h)
+        new_w = new_h * target_ratio
+        if new_w > canvas_w:
+            new_w = max(20.0, canvas_w)
+            new_h = new_w / max(0.01, target_ratio)
+
+        new_x = cx - new_w / 2.0
+        new_y = cy - new_h / 2.0
+
+        if new_x < 0:
+            new_x = 0.0
+        if new_y < 0:
+            new_y = 0.0
+        if new_x + new_w > canvas_w:
+            new_x = max(0.0, canvas_w - new_w)
+        if new_y + new_h > canvas_h:
+            new_y = max(0.0, canvas_h - new_h)
+
+        self.source_preview.set_layers(
+            QRectF(new_x, new_y, new_w, new_h),
+            QRectF(
+                float(game.get("x", 0) or 0),
+                float(game.get("y", 0) or 0),
+                max(20.0, float(game.get("w", 20) or 20)),
+                max(20.0, float(game.get("h", 20) or 20)),
+            ),
+        )
+        self._refresh_output_composite_preview()
+
+    def _format_ratio(self, layer: Dict[str, int]) -> str:
+        try:
+            w = max(1.0, float(layer.get("w", 1) or 1))
+            h = max(1.0, float(layer.get("h", 1) or 1))
+            return f"{(w / h):.4f}"
+        except Exception:
+            return "—"
+
+    def _update_ratio_indicators(self):
+        if not hasattr(self, "source_preview") or not hasattr(self, "output_preview"):
+            return
+        if not hasattr(self, "game_ratio_indicator") or not hasattr(self, "webcam_ratio_indicator"):
+            return
+
+        src = self.source_preview.get_layers()
+        out = self.output_preview.get_layers()
+
+        src_game = src.get("game") or {}
+        out_game = out.get("game") or {}
+        src_webcam = src.get("webcam") or {}
+        out_webcam = out.get("webcam") or {}
+
+        try:
+            game_match = abs((float(src_game.get("w", 1)) / max(1.0, float(src_game.get("h", 1)))) - (float(out_game.get("w", 1)) / max(1.0, float(out_game.get("h", 1))))) < 1e-3
+        except Exception:
+            game_match = False
+        try:
+            webcam_match = abs((float(src_webcam.get("w", 1)) / max(1.0, float(src_webcam.get("h", 1)))) - (float(out_webcam.get("w", 1)) / max(1.0, float(out_webcam.get("h", 1))))) < 1e-3
+        except Exception:
+            webcam_match = False
+
+        game_status = "✓" if game_match else "≠"
+        webcam_status = "✓" if webcam_match else "≠"
+        self.game_ratio_indicator.setText(
+            f"GAME ratio: 1-я {self._format_ratio(src_game)} / 2-я {self._format_ratio(out_game)} {game_status}"
+        )
+        self.webcam_ratio_indicator.setText(
+            f"WEBCAM ratio: 1-я {self._format_ratio(src_webcam)} / 2-я {self._format_ratio(out_webcam)} {webcam_status}"
+        )
 
     def _on_webcam_area_toggled(self):
         enabled = bool(self.dual_layer_enabled.isChecked()) if hasattr(self, "dual_layer_enabled") else True
@@ -1555,6 +1912,7 @@ class AutoShortsInterface(QWidget):
     def _apply_theme_style(self):
         p = get_theme_palette()
         dark = bool(p.get("is_dark"))
+        secondary_text = p.get("text_secondary") or ("#B0B0B0" if dark else "#666666")
         self.source_preview.set_theme(dark)
         self.output_preview.set_theme(dark)
         self.effects_preview.set_theme(dark)
@@ -1581,6 +1939,12 @@ class AutoShortsInterface(QWidget):
             QTableWidget::item:alternate {{ background: {row_alt_bg}; color: {p['text']}; }}
             QHeaderView::section {{ background: {p['panel_bg']}; color: {p['text']}; border: none; padding: 4px; }}
             QTableWidget::item:selected {{ background: {selected_bg}; color: {selected_fg}; }}
+
+            QLabel#semanticLlmHintLabel {{
+                color: {secondary_text};
+                font-size: 12px;
+                padding-left: 6px;
+            }}
 
             QScrollBar:vertical {{
                 background: transparent;
@@ -1657,6 +2021,173 @@ class AutoShortsInterface(QWidget):
             self._set_stage(1)
             self._sync_range_with_video_duration(file_path)
             self._load_source_preview_frame(file_path, self.preview_time_s.value())
+            self._refresh_cache_selectors()
+
+    @staticmethod
+    def _fmt_ms_to_hms(ms: int) -> str:
+        return AutoShortsInterface._fmt_s(int(max(0, ms) // 1000))
+
+    def _refresh_cache_selectors(self):
+        selected_asr_key = str(self.asr_cache_combo.currentData() or "") if hasattr(self, "asr_cache_combo") else ""
+        selected_candidates_key = str(self.candidates_cache_combo.currentData() or "") if hasattr(self, "candidates_cache_combo") else ""
+        self.asr_cache_combo.blockSignals(True)
+        self.candidates_cache_combo.blockSignals(True)
+        self.asr_cache_combo.clear()
+        self.candidates_cache_combo.clear()
+        self.asr_cache_combo.addItem("ASR кэш: авто", "")
+        self.candidates_cache_combo.addItem("Кандидаты кэш: авто", "")
+
+        if self.video_path:
+            try:
+                from app.thread.auto_shorts_thread import AutoShortsCandidateThread, AutoShortsTranscribeThread
+                asr_items = AutoShortsTranscribeThread.list_asr_caches_for_video(self.video_path)
+                for it in asr_items:
+                    s = self._fmt_ms_to_hms(int(it.get("start_ms", 0) or 0))
+                    e = self._fmt_ms_to_hms(int(it.get("end_ms", 0) or 0))
+                    txt = f"ASR кэш {s}–{e} [{str(it.get('key',''))[:8]}]"
+                    key = str(it.get("key", ""))
+                    self.asr_cache_combo.addItem(txt, key)
+                    idx_added = self.asr_cache_combo.count() - 1
+                    self.asr_cache_combo.setItemData(idx_added, int(it.get("start_ms", 0) or 0), Qt.UserRole + 1)
+                    self.asr_cache_combo.setItemData(idx_added, int(it.get("end_ms", 0) or 0), Qt.UserRole + 2)
+
+                # Важно: сохраняем выбранный ASR-кэш после пересборки списка,
+                # иначе выбор всегда «прыгает» обратно на авто.
+                if selected_asr_key:
+                    asr_idx = self.asr_cache_combo.findData(selected_asr_key)
+                    if asr_idx >= 0:
+                        self.asr_cache_combo.setCurrentIndex(asr_idx)
+
+                asr_fp = self._current_asr_fingerprint(selected_asr_key)
+                cand_items = AutoShortsCandidateThread.list_candidate_caches_for_video(
+                    self.video_path,
+                    asr_fingerprint=asr_fp,
+                )
+                for it in cand_items:
+                    cnt = int(it.get("count", 0) or 0)
+                    txt = f"Кандидаты кэш ({cnt}) [{str(it.get('key',''))[:8]}]"
+                    self.candidates_cache_combo.addItem(txt, str(it.get("key", "")))
+
+                # Аналогично восстанавливаем выбор candidate-кэша.
+                if selected_candidates_key:
+                    cand_idx = self.candidates_cache_combo.findData(selected_candidates_key)
+                    if cand_idx >= 0:
+                        self.candidates_cache_combo.setCurrentIndex(cand_idx)
+            except Exception:
+                pass
+
+        self.asr_cache_combo.blockSignals(False)
+        self.candidates_cache_combo.blockSignals(False)
+
+    def _on_asr_cache_changed(self, _index: int):
+        # Важно: не пересобираем ASR-combo при выборе, иначе UI может
+        # визуально «прыгать» обратно на авто на некоторых платформах.
+        # Обновляем только зависимый список candidate-кэшей.
+        self._refresh_candidates_cache_selector()
+        self._apply_selected_asr_cache_range()
+
+    def _refresh_candidates_cache_selector(self):
+        selected_candidates_key = str(self.candidates_cache_combo.currentData() or "") if hasattr(self, "candidates_cache_combo") else ""
+        self.candidates_cache_combo.blockSignals(True)
+        self.candidates_cache_combo.clear()
+        self.candidates_cache_combo.addItem("Кандидаты кэш: авто", "")
+        if self.video_path:
+            try:
+                from app.thread.auto_shorts_thread import AutoShortsCandidateThread
+                asr_key = str(self.asr_cache_combo.currentData() or "")
+                asr_fp = self._current_asr_fingerprint(asr_key)
+                cand_items = AutoShortsCandidateThread.list_candidate_caches_for_video(
+                    self.video_path,
+                    asr_fingerprint=asr_fp,
+                )
+                for it in cand_items:
+                    cnt = int(it.get("count", 0) or 0)
+                    txt = f"Кандидаты кэш ({cnt}) [{str(it.get('key',''))[:8]}]"
+                    self.candidates_cache_combo.addItem(txt, str(it.get("key", "")))
+                if selected_candidates_key:
+                    cand_idx = self.candidates_cache_combo.findData(selected_candidates_key)
+                    if cand_idx >= 0:
+                        self.candidates_cache_combo.setCurrentIndex(cand_idx)
+            except Exception:
+                pass
+        self.candidates_cache_combo.blockSignals(False)
+
+    def _apply_selected_asr_cache_range(self):
+        if not self.video_path:
+            return
+        try:
+            idx = int(self.asr_cache_combo.currentIndex())
+            if idx <= 0:
+                return  # "ASR кэш: авто"
+            asr_key = str(self.asr_cache_combo.currentData() or "")
+            start_ms = self.asr_cache_combo.itemData(idx, Qt.UserRole + 1)
+            end_ms = self.asr_cache_combo.itemData(idx, Qt.UserRole + 2)
+            # Для части legacy-кэшей диапазон в списке может быть 0..0.
+            # Тогда дочитываем фактические границы напрямую из файла кэша.
+            if start_ms is None or end_ms is None or int(end_ms or 0) <= int(start_ms or 0):
+                start_ms, end_ms = self._read_asr_cache_range_ms(asr_key)
+            if start_ms is None or end_ms is None or int(end_ms or 0) <= int(start_ms or 0):
+                return
+            start_s = max(0, int(start_ms) // 1000)
+            end_s = max(start_s + 1, int(end_ms) // 1000)
+            end_s = min(int(self.video_duration_s or end_s), end_s)
+            self.selected_start_s = start_s
+            self.selected_end_s = end_s
+            self.range_slider.set_values(self.selected_start_s, self.selected_end_s, emit_signal=False)
+            self._update_range_labels()
+        except Exception:
+            pass
+
+    def _read_asr_cache_range_ms(self, cache_key: str):
+        try:
+            if not cache_key:
+                return None, None
+            p = Path(APPDATA_PATH) / "cache" / "auto_shorts_asr" / f"{cache_key}.json"
+            if not p.exists():
+                return None, None
+            data = json.loads(p.read_text(encoding="utf-8"))
+            asr = data.get("asr") if isinstance(data, dict) else None
+            if not asr:
+                return None, None
+            starts, ends = [], []
+            rows = []
+            if isinstance(asr, dict):
+                rows = [v for k, v in asr.items() if (str(k).isdigit() and isinstance(v, dict))]
+            elif isinstance(asr, list):
+                rows = [v for v in asr if isinstance(v, dict)]
+            for row in rows:
+                s = row.get("start_time", row.get("start_ms", row.get("start", None)))
+                e = row.get("end_time", row.get("end_ms", row.get("end", None)))
+                if s is None or e is None:
+                    continue
+                starts.append(int(s))
+                ends.append(int(e))
+            if starts and ends:
+                return int(min(starts)), int(max(ends))
+        except Exception:
+            pass
+        return None, None
+
+    def _current_asr_fingerprint(self, selected_asr_key: str = "") -> str:
+        try:
+            key = str(selected_asr_key or "").strip()
+            if key:
+                p = Path(APPDATA_PATH) / "cache" / "auto_shorts_asr" / f"{key}.json"
+                if p.exists():
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    asr_json = data.get("asr") if isinstance(data, dict) else None
+                    if asr_json:
+                        return hashlib.sha1(
+                            json.dumps(asr_json, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+                        ).hexdigest()
+            asr_json = (self.asr_payload or {}).get("asr_json") if isinstance(self.asr_payload, dict) else None
+            if asr_json:
+                return hashlib.sha1(
+                    json.dumps(asr_json, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+                ).hexdigest()
+        except Exception:
+            pass
+        return ""
 
     def _reload_preview_frame(self):
         if not self.video_path:
@@ -1945,6 +2476,7 @@ class AutoShortsInterface(QWidget):
             range_enabled=True,
             range_start_s=range_start,
             range_end_s=range_end,
+            selected_asr_cache_key=str(self.asr_cache_combo.currentData() or ""),
         )
         self.transcribe_thread.progress.connect(self._on_progress)
         self.transcribe_thread.finished.connect(self._on_transcribe_finished)
@@ -1954,6 +2486,7 @@ class AutoShortsInterface(QWidget):
     def _on_transcribe_finished(self, asr_payload: Dict):
         self.asr_payload = dict(asr_payload or {})
         self._update_llm_token_estimate()
+        self._refresh_cache_selectors()
         self.transcribe_btn.setEnabled(True)
         self.select_candidates_btn.setEnabled(True)
         self.run_all_btn.setEnabled(True)
@@ -2023,7 +2556,14 @@ class AutoShortsInterface(QWidget):
             auto_filter_profile=self._auto_filter_profile_value(),
             interest_threshold_percent=self.interest_threshold_spin.value(),
             llm_search_intensity=self.llm_search_intensity_spin.value(),
+            semantic_stitch_enabled=bool(self.semantic_stitch_enabled_checkbox.isChecked()),
+            semantic_stitch_profile=self._semantic_stitch_profile_value(),
+            topic_timeline_profile=self._topic_timeline_profile_value(),
+            semantic_bridge_max_gap_s=int(self.semantic_bridge_max_gap_spin.value()),
+            semantic_llm_interruptions_mode=bool(self.semantic_llm_interruptions_mode_checkbox.isChecked()),
+            semantic_coherence_check_enabled=bool(self.semantic_coherence_check_checkbox.isChecked()),
             use_candidates_cache=bool(self.cache_candidates_checkbox.isChecked()),
+            selected_candidates_cache_key=str(self.candidates_cache_combo.currentData() or ""),
         )
         self.candidate_thread.progress.connect(self._on_progress)
         self.candidate_thread.finished.connect(self._on_candidate_selection_finished)
@@ -2036,6 +2576,7 @@ class AutoShortsInterface(QWidget):
         self.run_all_btn.setEnabled(True)
         self.render_btn.setEnabled(True)
         self.candidates = candidates
+        self._refresh_cache_selectors()
         for c in self.candidates:
             c["manual_start_ms"] = int(c.get("start_ms", 0) or 0)
             c["manual_end_ms"] = int(c.get("end_ms", 0) or 0)
@@ -2607,6 +3148,12 @@ class AutoShortsInterface(QWidget):
                 "auto_filter_profile": self._auto_filter_profile_value(),
                 "interest_threshold_percent": int(self.interest_threshold_spin.value()),
                 "llm_search_intensity": int(self.llm_search_intensity_spin.value()),
+                "semantic_stitch_enabled": bool(self.semantic_stitch_enabled_checkbox.isChecked()),
+                "semantic_stitch_profile": self._semantic_stitch_profile_value(),
+                "topic_timeline_profile": self._topic_timeline_profile_value(),
+                "semantic_llm_interruptions_mode": bool(self.semantic_llm_interruptions_mode_checkbox.isChecked()),
+                "semantic_coherence_check_enabled": bool(self.semantic_coherence_check_checkbox.isChecked()),
+                "semantic_bridge_max_gap_s": int(self.semantic_bridge_max_gap_spin.value()),
                 "render_sort_mode": self._get_render_sort_mode(),
                 "filename_include_title": bool(self.filename_include_title_checkbox.isChecked()),
                 "filename_include_time_range": bool(self.filename_include_time_checkbox.isChecked()),
@@ -2945,6 +3492,34 @@ class AutoShortsInterface(QWidget):
                     self.llm_search_intensity_spin.setValue(
                         int(ui_settings.get("llm_search_intensity", self.llm_search_intensity_spin.value()))
                     )
+                    self.semantic_stitch_enabled_checkbox.setChecked(
+                        bool(ui_settings.get("semantic_stitch_enabled", self.semantic_stitch_enabled_checkbox.isChecked()))
+                    )
+                    self.semantic_llm_interruptions_mode_checkbox.setChecked(
+                        bool(
+                            ui_settings.get(
+                                "semantic_llm_interruptions_mode",
+                                self.semantic_llm_interruptions_mode_checkbox.isChecked(),
+                            )
+                        )
+                    )
+                    self.semantic_coherence_check_checkbox.setChecked(
+                        bool(
+                            ui_settings.get(
+                                "semantic_coherence_check_enabled",
+                                self.semantic_coherence_check_checkbox.isChecked(),
+                            )
+                        )
+                    )
+                    self._set_semantic_stitch_profile_value(
+                        str(ui_settings.get("semantic_stitch_profile", self._semantic_stitch_profile_value()) or "balanced")
+                    )
+                    self._set_topic_timeline_profile_value(
+                        str(ui_settings.get("topic_timeline_profile", self._topic_timeline_profile_value()) or "balanced")
+                    )
+                    self.semantic_bridge_max_gap_spin.setValue(
+                        int(ui_settings.get("semantic_bridge_max_gap_s", self.semantic_bridge_max_gap_spin.value()))
+                    )
 
                     self._set_render_sort_mode(
                         str(ui_settings.get("render_sort_mode", self._get_render_sort_mode()) or self._get_render_sort_mode())
@@ -3071,6 +3646,49 @@ class AutoShortsInterface(QWidget):
             self.auto_filter_profile_combo.setCurrentText("Строгий")
         else:
             self.auto_filter_profile_combo.setCurrentText("Сбалансированный")
+
+    def _semantic_stitch_profile_value(self) -> str:
+        text = (self.semantic_stitch_profile_combo.currentText() or "Сбалансированный").strip().lower()
+        if "мяг" in text:
+            return "soft"
+        if "строг" in text:
+            return "strict"
+        return "balanced"
+
+    def _set_semantic_stitch_profile_value(self, profile: str):
+        p = str(profile or "balanced").strip().lower()
+        if p == "soft":
+            self.semantic_stitch_profile_combo.setCurrentText("Мягкий")
+        elif p == "strict":
+            self.semantic_stitch_profile_combo.setCurrentText("Строгий")
+        else:
+            self.semantic_stitch_profile_combo.setCurrentText("Сбалансированный")
+
+    def _topic_timeline_profile_value(self) -> str:
+        text = (self.topic_timeline_profile_combo.currentText() or "Сбалансированный").strip().lower()
+        if "мяг" in text:
+            return "soft"
+        if "строг" in text:
+            return "strict"
+        return "balanced"
+
+    def _set_topic_timeline_profile_value(self, profile: str):
+        p = str(profile or "balanced").strip().lower()
+        if p == "soft":
+            self.topic_timeline_profile_combo.setCurrentText("Мягкий")
+        elif p == "strict":
+            self.topic_timeline_profile_combo.setCurrentText("Строгий")
+        else:
+            self.topic_timeline_profile_combo.setCurrentText("Сбалансированный")
+
+    def _update_semantic_controls_visibility(self):
+        enabled = bool(self.semantic_stitch_enabled_checkbox.isChecked())
+        if hasattr(self, "semantic_llm_interruptions_mode_checkbox"):
+            self.semantic_llm_interruptions_mode_checkbox.setVisible(enabled)
+        if hasattr(self, "semantic_coherence_check_checkbox"):
+            self.semantic_coherence_check_checkbox.setVisible(enabled)
+        if hasattr(self, "semantic_controls_wrap"):
+            self.semantic_controls_wrap.setVisible(enabled)
 
     @staticmethod
     def _collect_asr_text(asr_json: Dict) -> str:
@@ -3766,6 +4384,8 @@ class AutoShortsInterface(QWidget):
             "resolution_mode": resolution_mode,
             "resolution": resolution_value,
             "quality_profile": quality_profile,
+            "min_duration_s": int(self.min_duration.value()),
+            "max_duration_s": int(self.max_duration.value()),
             "sort_mode": self._get_render_sort_mode(),
             "clip_head_pad_ms": int(self.clip_head_pad_spin.value()),
             "clip_tail_pad_ms": int(self.clip_tail_pad_spin.value()),
