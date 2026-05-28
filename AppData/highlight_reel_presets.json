@@ -1,0 +1,28 @@
+{
+  "Mechanik": {
+    "target_reel_minutes": 15,
+    "interest_level": "balanced",
+    "interest_threshold_percent": 55,
+    "head_pad_ms": 220,
+    "tail_pad_ms": 260,
+    "boring_profile": "balanced",
+    "export_vertical": false,
+    "backend": "gpu",
+    "cache_asr": true,
+    "cache_candidates": false
+  },
+  "Тест": {
+    "min_duration_s": 20,
+    "max_duration_s": 80,
+    "min_candidates": 20,
+    "max_candidates": 60,
+    "interest_threshold_percent": 55,
+    "head_pad_ms": 220,
+    "tail_pad_ms": 260,
+    "boring_profile": "balanced",
+    "export_vertical": true,
+    "backend": "gpu",
+    "cache_asr": true,
+    "cache_candidates": true
+  }
+}

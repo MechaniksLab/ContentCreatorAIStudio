@@ -77,6 +77,12 @@ class ShortsProcessor:
         auto_filter_profile: str = "balanced",
         interest_threshold_percent: int = 52,
         llm_search_intensity: int = 3,
+        semantic_stitch_enabled: bool = False,
+        semantic_stitch_profile: str = "balanced",
+        topic_timeline_profile: str = "balanced",
+        semantic_bridge_max_gap_s: int = 90,
+        semantic_llm_interruptions_mode: bool = False,
+        semantic_coherence_check_enabled: bool = False,
     ):
         self.min_duration_ms = int(min_duration_s * 1000)
         self.max_duration_ms = int(max_duration_s * 1000)
@@ -91,6 +97,14 @@ class ShortsProcessor:
         self.auto_filter_profile = profile if profile in {"soft", "balanced", "strict"} else "balanced"
         self.interest_threshold_percent = max(30, min(95, int(interest_threshold_percent or 52)))
         self.llm_search_intensity = max(1, min(5, int(llm_search_intensity or 3)))
+        self.semantic_stitch_enabled = bool(semantic_stitch_enabled)
+        sem_profile = str(semantic_stitch_profile or "balanced").strip().lower()
+        self.semantic_stitch_profile = sem_profile if sem_profile in {"soft", "balanced", "strict"} else "balanced"
+        tt_profile = str(topic_timeline_profile or "balanced").strip().lower()
+        self.topic_timeline_profile = tt_profile if tt_profile in {"soft", "balanced", "strict"} else "balanced"
+        self.semantic_bridge_max_gap_s = max(10, min(600, int(semantic_bridge_max_gap_s or 90)))
+        self.semantic_llm_interruptions_mode = bool(semantic_llm_interruptions_mode)
+        self.semantic_coherence_check_enabled = bool(semantic_coherence_check_enabled)
 
     def find_candidates(self, asr_data: ASRData, progress_cb: Optional[Callable] = None) -> List[ShortCandidate]:
         if progress_cb:
@@ -102,21 +116,40 @@ class ShortsProcessor:
                 progress_cb(12, "AI Enterprise: семантический анализ эпизодов...")
             llm_candidates = self._build_enterprise_llm_candidates(asr_data, progress_cb=progress_cb)
 
-        heuristic_candidates = self._build_heuristic_candidates(asr_data)
+        if progress_cb:
+            progress_cb(53, "Post-LLM: эвристический поиск кандидатов...")
+        heuristic_candidates = self._build_heuristic_candidates(
+            asr_data,
+            progress_cb=progress_cb,
+            progress_prefix="Heuristic",
+        )
         if llm_candidates:
             # Не полагаемся только на LLM: домешиваем эвристику,
             # чтобы не получать 1-2 скучных кандидата на всём диапазоне.
             candidates = llm_candidates + heuristic_candidates[:260]
             candidates.sort(key=lambda x: x.score, reverse=True)
-            candidates = self._deduplicate(candidates)
+            if progress_cb:
+                progress_cb(53, "Post-LLM: дедупликация объединённого пула...")
+            candidates = self._deduplicate(candidates, progress_cb=progress_cb, progress_prefix="Post-LLM dedup")
         else:
             candidates = heuristic_candidates
 
         # Если после всех фильтров кандидатов всё ещё мало,
         # делаем расширенный проход с более мягкими порогами.
         if len(candidates) < self.min_candidates:
-            expanded = self._build_heuristic_candidates(asr_data, relaxed=True)
-            candidates = self._deduplicate((candidates + expanded) if candidates else expanded)
+            expanded = self._build_heuristic_candidates(
+                asr_data,
+                relaxed=True,
+                progress_cb=progress_cb,
+                progress_prefix="Heuristic relaxed",
+            )
+            if progress_cb:
+                progress_cb(54, "Post-LLM: дедупликация expanded-пула...")
+            candidates = self._deduplicate(
+                (candidates + expanded) if candidates else expanded,
+                progress_cb=progress_cb,
+                progress_prefix="Expanded dedup",
+            )
             candidates.sort(key=lambda x: x.score, reverse=True)
 
         if progress_cb:
@@ -129,9 +162,15 @@ class ShortsProcessor:
         pre_precision_candidates = list(candidates)
 
         # Pass-2 (precision): локально ужесточаем качество до LLM rerank.
+        if progress_cb:
+            progress_cb(58, "Post-LLM: precision pass...")
         candidates = self._precision_pass(candidates)
 
+        if progress_cb:
+            progress_cb(64, "Post-LLM: LLM rerank...")
         reranked = self._try_llm_rerank(candidates)
+        if progress_cb:
+            progress_cb(70, "Post-LLM: diversify timeline...")
         reranked = self._diversify_by_timeline(reranked)
 
         interested_filtered = self._apply_interest_threshold(reranked)
@@ -155,6 +194,8 @@ class ShortsProcessor:
             reranked = mixed
 
         if self.auto_filter_weak_candidates:
+            if progress_cb:
+                progress_cb(76, "Post-LLM: авто-фильтр слабых кандидатов...")
             weak_filtered = self._auto_filter_weak_candidates(reranked)
             min_safe = max(3, int(self.min_candidates * 0.55))
             if len(weak_filtered) >= min_safe:
@@ -207,8 +248,418 @@ class ShortsProcessor:
 
         if progress_cb:
             progress_cb(85, f"Кандидаты после ранжирования: {len(reranked)}")
+
+        if self.semantic_stitch_enabled and self._llm_ready() and reranked:
+            if progress_cb:
+                progress_cb(88, "Semantic Stitch: подготовка тематического refine-pass...")
+            reranked = self._topic_timeline_refine_candidates(reranked, asr_data, progress_cb=progress_cb)
+            if progress_cb:
+                progress_cb(94, "Semantic Stitch: анализ связей между тематическими моментами...")
+            reranked = self._semantic_stitch_candidates(reranked, asr_data, progress_cb=progress_cb)
+            if self.semantic_coherence_check_enabled:
+                reranked = self._semantic_coherence_pass(reranked, asr_data, progress_cb=progress_cb)
+            if progress_cb:
+                progress_cb(97, "Semantic Stitch: финализация склейки тематических моментов...")
+
         final_candidates = list(reranked)
         return final_candidates
+
+    def _topic_timeline_refine_candidates(
+        self,
+        candidates: List[ShortCandidate],
+        asr_data: ASRData,
+        progress_cb: Optional[Callable] = None,
+    ) -> List[ShortCandidate]:
+        """LLM-pass: для каждого сильного кандидата оставляет только реплики по теме внутри окна кандидата.
+
+        Возвращает те же кандидаты, но с уточнёнными speech_ranges (вырез оффтопа/boring-вставок).
+        """
+        if not candidates or not self._llm_ready():
+            return candidates
+
+        segs = [s for s in asr_data.segments if (s.text or "").strip()]
+        if not segs:
+            return candidates
+
+        profile_cfg = {
+            "soft": {"work_n": max(12, min(44, self.max_candidates)), "max_rows": 64, "min_keep": 1},
+            "balanced": {"work_n": max(10, min(36, self.max_candidates)), "max_rows": 52, "min_keep": 2},
+            "strict": {"work_n": max(8, min(30, self.max_candidates)), "max_rows": 42, "min_keep": 3},
+        }.get(self.topic_timeline_profile, {"work_n": max(10, min(36, self.max_candidates)), "max_rows": 52, "min_keep": 2})
+
+        work_n = min(len(candidates), int(profile_cfg["work_n"]))
+        out: List[ShortCandidate] = []
+        client = openai.OpenAI(base_url=self.llm_base_url, api_key=self.llm_api_key)
+        keep_min = int(profile_cfg["min_keep"])
+        max_rows = int(profile_cfg["max_rows"])
+        for idx, c in enumerate(candidates):
+            if progress_cb and work_n > 0 and idx < work_n and (idx == 0 or idx % 3 == 0 or idx + 1 == work_n):
+                p = 89 + int((idx / max(1, work_n)) * 4)
+                progress_cb(min(93, p), f"Topic Timeline: {idx + 1}/{work_n}")
+            if idx >= work_n:
+                out.append(c)
+                continue
+
+            local = []
+            for s_idx, s in enumerate(segs):
+                if int(s.end_time) < int(c.start_ms) or int(s.start_time) > int(c.end_ms):
+                    continue
+                local.append(
+                    {
+                        "idx": int(s_idx),
+                        "start_ms": int(s.start_time),
+                        "end_ms": int(s.end_time),
+                        "text": self._shorten((s.text or "").strip(), 92),
+                    }
+                )
+                if len(local) >= max_rows:
+                    break
+            if len(local) < 2:
+                out.append(c)
+                continue
+
+            if self.semantic_llm_interruptions_mode:
+                prompt_sys = (
+                    "Ты редактор шортсов. Оставь только реплики, относящиеся к главной теме момента, "
+                    "и исключи оффтоп/технический разговор/скучные вставки. "
+                    "Особенно важно: если внутри окна есть перебивания/вставки других людей, "
+                    "которые НЕ развивают основную тему, исключай их из keep. "
+                    "Если тема после перебивания продолжается — оставь только релевантные реплики до и после. "
+                    "Критично: сохраняй сюжетную целостность в порядке времени: начало -> развитие -> продолжение темы. "
+                    "Не оставляй нейтральные мостики, если они не развивают тему. "
+                    "Верни СТРОГО JSON: {\"keep\":[int,int,...],\"reason\":str}."
+                )
+            else:
+                prompt_sys = (
+                    "Ты редактор шортсов. Оставь только реплики, относящиеся к главной теме момента, "
+                    "и исключи оффтоп/технический разговор/скучные вставки. "
+                    "Критично: сохраняй сюжетную целостность в порядке времени: начало -> развитие -> продолжение темы. "
+                    "Не оставляй нейтральные мостики, если они не развивают тему. "
+                    "Верни СТРОГО JSON: {\"keep\":[int,int,...],\"reason\":str}."
+                )
+            prompt_user = (
+                f"Тема-кандидат: title={self._shorten(c.title, 80)}; excerpt={self._shorten(c.excerpt, 140)}\n"
+                f"Сегменты окна: {json.dumps(local, ensure_ascii=False)}"
+            )
+            try:
+                rsp = client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=[
+                        {"role": "system", "content": prompt_sys},
+                        {"role": "user", "content": prompt_user},
+                    ],
+                    temperature=0.1,
+                    max_tokens=260,
+                    timeout=90,
+                )
+                data = self._extract_json((rsp.choices[0].message.content or "").strip())
+                keep_ids = data.get("keep", []) if isinstance(data, dict) else []
+                keep_ids = [int(x) for x in keep_ids if isinstance(x, (int, float, str))]
+            except Exception:
+                continue
+
+            if not keep_ids:
+                continue
+
+            keep_set = {int(x) for x in keep_ids}
+            keep_ranges = []
+            kept_local_rows = []
+            for r in local:
+                if int(r["idx"]) in keep_set:
+                    keep_ranges.append((int(r["start_ms"]), int(r["end_ms"])))
+                    kept_local_rows.append(r)
+            if len(keep_ranges) < keep_min:
+                continue
+
+            keep_ranges.sort(key=lambda x: x[0])
+            merged = [keep_ranges[0]]
+            for s, e in keep_ranges[1:]:
+                ps, pe = merged[-1]
+                if s - pe <= 180:
+                    merged[-1] = (ps, max(pe, e))
+                else:
+                    merged.append((s, e))
+
+            # Smart start: внутри уже отобранной темы сдвигаем старт к более «цепляющей» реплике,
+            # но только в коротком окне, чтобы не ломать контекст.
+            hook_row = self._pick_smart_start_row(kept_local_rows)
+            if hook_row is not None and merged:
+                hs = int(hook_row.get("start_ms", merged[0][0]))
+                if hs > merged[0][0] and hs - merged[0][0] <= 3200:
+                    merged[0] = (hs, merged[0][1])
+
+            # Smart tail: стараемся закончить на смысловом/эмоциональном хвосте,
+            # чтобы не обрывать кульминацию.
+            tail_row = self._pick_smart_tail_row(kept_local_rows)
+            if tail_row is not None and merged:
+                te = int(tail_row.get("end_ms", merged[-1][1]))
+                if te >= merged[-1][1] - 1200:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], te))
+
+            c.speech_ranges = merged
+            c.speech_ranges = self._rank_and_trim_ranges(c.speech_ranges, c)
+            old_tags = list(c.explainability_tags or [])
+            if "topic_timeline" not in old_tags:
+                old_tags.append("topic_timeline")
+            c.explainability_tags = old_tags[:12]
+            out.append(c)
+
+        return out
+
+    def _rank_and_trim_ranges(
+        self,
+        ranges: List[Tuple[int, int]],
+        candidate: Optional[ShortCandidate] = None,
+    ) -> List[Tuple[int, int]]:
+        if not ranges:
+            return []
+        ranked = []
+        for s, e in ranges:
+            dur = max(1, int(e) - int(s))
+            base = min(10.0, dur / 1800.0)
+            hook = float(getattr(candidate, "hook_score", 0.0) or 0.0) if candidate else 0.0
+            novelty = float(getattr(candidate, "novelty_score", 0.0) or 0.0) if candidate else 0.0
+            quality = float(getattr(candidate, "quality_score", 0.0) or 0.0) if candidate else 0.0
+            score = base + hook * 0.22 + novelty * 0.18 + quality * 0.03
+            ranked.append((score, (int(s), int(e))))
+
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        max_ranges = 8
+        selected = [r for _, r in ranked[:max_ranges]]
+        selected.sort(key=lambda x: x[0])
+        return selected
+
+    def _semantic_coherence_pass(
+        self,
+        candidates: List[ShortCandidate],
+        asr_data: ASRData,
+        progress_cb: Optional[Callable] = None,
+    ) -> List[ShortCandidate]:
+        if not candidates or not self._llm_ready():
+            return candidates
+
+        client = openai.OpenAI(base_url=self.llm_base_url, api_key=self.llm_api_key)
+        out: List[ShortCandidate] = []
+        total = max(1, len(candidates))
+        for i, c in enumerate(candidates, 1):
+            if progress_cb and (i == 1 or i % 4 == 0 or i == total):
+                progress_cb(95, f"Semantic coherence: {i}/{total}")
+
+            summary = {
+                "title": self._shorten(c.title or "", 96),
+                "excerpt": self._shorten(c.excerpt or "", 180),
+                "ranges": list(c.speech_ranges or []),
+            }
+            system = (
+                "Проверь связность темы внутри шортса. Должна быть структура: начало -> развитие -> продолжение. "
+                "Верни только JSON {\"coherent\":bool,\"reason\":str}."
+            )
+            user = f"Кандидат: {json.dumps(summary, ensure_ascii=False)}"
+            try:
+                rsp = client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    temperature=0.1,
+                    max_tokens=120,
+                    timeout=60,
+                )
+                data = self._extract_json((rsp.choices[0].message.content or "").strip())
+                coherent = bool(data.get("coherent", True)) if isinstance(data, dict) else True
+            except Exception:
+                coherent = True
+
+            if coherent:
+                out.append(c)
+                continue
+
+            if c.speech_ranges and len(c.speech_ranges) > 1:
+                rescored = self._rank_and_trim_ranges(c.speech_ranges, c)
+                c.speech_ranges = rescored[: max(1, len(rescored) - 1)]
+            out.append(c)
+        return out
+
+    def _pick_smart_start_row(self, kept_rows: List[Dict]) -> Optional[Dict]:
+        if not kept_rows:
+            return None
+        head = kept_rows[:4]
+        best = None
+        best_score = -1.0
+        for r in head:
+            txt = str(r.get("text", "") or "")
+            score = float(self._estimate_hook_score(txt))
+            if score > best_score:
+                best_score = score
+                best = r
+        return best if best_score >= 6.0 else None
+
+    def _pick_smart_tail_row(self, kept_rows: List[Dict]) -> Optional[Dict]:
+        if not kept_rows:
+            return None
+        tail = kept_rows[-4:]
+        best = None
+        best_score = -1.0
+        for r in tail:
+            txt = str(r.get("text", "") or "")
+            low = txt.lower()
+            score = 0.0
+            if any(k in low for k in ["поэтому", "в итоге", "короче", "вот почему", "итог", "финал"]):
+                score += 2.5
+            if any(sym in txt for sym in ["!", "?", "…"]):
+                score += 1.8
+            score += min(2.5, float(self._estimate_hook_score(txt)) * 0.35)
+            if score > best_score:
+                best_score = score
+                best = r
+        return best if best_score >= 2.4 else None
+
+    def _semantic_stitch_candidates(
+        self,
+        candidates: List[ShortCandidate],
+        asr_data: ASRData,
+        progress_cb: Optional[Callable] = None,
+    ) -> List[ShortCandidate]:
+        if not candidates:
+            return []
+
+        profile_cfg = {
+            "soft": {"min_rel": 0.56, "max_links": 3},
+            "balanced": {"min_rel": 0.64, "max_links": 2},
+            "strict": {"min_rel": 0.72, "max_links": 1},
+        }.get(self.semantic_stitch_profile, {"min_rel": 0.64, "max_links": 2})
+
+        max_gap_ms = int(self.semantic_bridge_max_gap_s * 1000)
+        min_rel = float(profile_cfg["min_rel"])
+        max_links = int(profile_cfg["max_links"])
+
+        pool = sorted(candidates, key=lambda x: x.score, reverse=True)
+        top_n = min(len(pool), max(12, min(64, self.max_candidates * 2)))
+        focus = pool[:top_n]
+
+        rows = []
+        for idx, c in enumerate(focus):
+            rows.append(
+                {
+                    "id": idx,
+                    "start_ms": int(c.start_ms),
+                    "end_ms": int(c.end_ms),
+                    "title": self._shorten(str(c.title or ""), 96),
+                    "excerpt": self._shorten(str(c.excerpt or ""), 180),
+                    "quality": float(getattr(c, "quality_score", 0.0) or 0.0),
+                }
+            )
+
+        client = openai.OpenAI(base_url=self.llm_base_url, api_key=self.llm_api_key)
+        system = (
+            "Ты редактор shorts и монтажёр. Твоя задача — найти кандидаты, которые относятся к одной теме, "
+            "но разделены оффтопом. Верни только JSON: "
+            "{\"links\":[{\"from_id\":int,\"to_id\":int,\"relevance\":0..1,\"reason\":str}]}. "
+            "Связывай только действительно одну тему; избегай ложных склеек."
+        )
+        user = (
+            f"Максимальный разрыв между связанными кусками: {max_gap_ms}ms. "
+            f"Минимальная строгость relevance: {min_rel}. "
+            f"Кандидаты: {json.dumps(rows, ensure_ascii=False)}"
+        )
+
+        try:
+            rsp = client.chat.completions.create(
+                model=self.llm_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.1,
+                max_tokens=420,
+                timeout=120,
+            )
+            data = self._extract_json((rsp.choices[0].message.content or "").strip())
+            links = data.get("links", []) if isinstance(data, dict) else []
+        except Exception as e:
+            logger.warning("Semantic stitch skipped: %s", e)
+            return candidates
+
+        by_id = {i: c for i, c in enumerate(focus)}
+        merged_extra: List[ShortCandidate] = []
+        used_pairs = set()
+
+        links_total = max(1, len(links))
+        for link_idx, it in enumerate(links, 1):
+            if progress_cb and (link_idx == 1 or link_idx % 4 == 0 or link_idx == links_total):
+                p = 94 + int((link_idx / links_total) * 3)
+                progress_cb(min(97, p), f"Semantic Stitch: обработка связей {link_idx}/{links_total}")
+            try:
+                a = int(it.get("from_id"))
+                b = int(it.get("to_id"))
+                rel = float(it.get("relevance", 0.0) or 0.0)
+            except Exception:
+                continue
+            if a == b or a not in by_id or b not in by_id:
+                continue
+            if rel < min_rel:
+                continue
+
+            c1, c2 = by_id[a], by_id[b]
+            left, right = (c1, c2) if c1.start_ms <= c2.start_ms else (c2, c1)
+            gap = int(right.start_ms - left.end_ms)
+            if gap < 0 or gap > max_gap_ms:
+                continue
+
+            key = (left.start_ms, left.end_ms, right.start_ms, right.end_ms)
+            if key in used_pairs:
+                continue
+            used_pairs.add(key)
+
+            link_count = 0
+            ranges = list(left.speech_ranges or [])
+            if right.speech_ranges:
+                for rr in right.speech_ranges:
+                    ranges.append((int(rr[0]), int(rr[1])))
+                    link_count += 1
+                    if link_count >= max_links:
+                        break
+
+            if not ranges:
+                ranges = [(left.start_ms, left.end_ms), (right.start_ms, right.end_ms)]
+
+            ranges.sort(key=lambda x: x[0])
+            merged_ranges: List[Tuple[int, int]] = [ranges[0]]
+            for s, e in ranges[1:]:
+                ps, pe = merged_ranges[-1]
+                if s - pe <= 180:
+                    merged_ranges[-1] = (ps, max(pe, e))
+                else:
+                    merged_ranges.append((s, e))
+
+            combined_excerpt = f"{left.excerpt} … {right.excerpt}".strip()
+            merged_extra.append(
+                ShortCandidate(
+                    start_ms=int(left.start_ms),
+                    end_ms=int(right.end_ms),
+                    score=round(max(float(left.score), float(right.score), (float(left.score) + float(right.score)) / 2.0), 2),
+                    title=self._shorten(left.title or right.title or "Связанный тематический момент", 72),
+                    reason=self._shorten(f"Semantic stitch: {it.get('reason', 'продолжение темы через оффтоп')}", 220),
+                    excerpt=self._shorten(combined_excerpt, 220),
+                    viral_title=self._build_viral_title(left.viral_title or right.viral_title or left.title or right.title),
+                    speech_ranges=merged_ranges,
+                    speech_density=max(float(getattr(left, "speech_density", 0.0) or 0.0), float(getattr(right, "speech_density", 0.0) or 0.0)),
+                    pause_ratio=min(float(getattr(left, "pause_ratio", 1.0) or 1.0), float(getattr(right, "pause_ratio", 1.0) or 1.0)),
+                    hook_score=max(float(getattr(left, "hook_score", 0.0) or 0.0), float(getattr(right, "hook_score", 0.0) or 0.0)),
+                    novelty_score=max(float(getattr(left, "novelty_score", 0.0) or 0.0), float(getattr(right, "novelty_score", 0.0) or 0.0)),
+                    quality_score=max(float(getattr(left, "quality_score", 0.0) or 0.0), float(getattr(right, "quality_score", 0.0) or 0.0)),
+                    quality_grade=("A" if max(float(getattr(left, "quality_score", 0.0) or 0.0), float(getattr(right, "quality_score", 0.0) or 0.0)) >= 82 else "B"),
+                    explainability_tags=["semantic_stitch", f"rel:{round(rel, 2)}"],
+                )
+            )
+
+        if not merged_extra:
+            return candidates
+
+        combined = candidates + merged_extra
+        combined.sort(key=lambda x: x.score, reverse=True)
+        combined = self._deduplicate(combined)
+        if len(combined) > self.max_candidates:
+            combined = combined[: self.max_candidates]
+        return combined
 
     def _resolve_target_candidate_count(
         self,
@@ -377,8 +828,17 @@ class ShortsProcessor:
                 p = 12 + int((i / max(1, len(packets))) * 36)
                 progress_cb(min(52, p), f"AI Enterprise: пакет {i}/{len(packets)}")
 
+        if progress_cb:
+            progress_cb(52, f"AI Enterprise: обработка пакетов завершена, сырых AI-кандидатов: {len(all_candidates)}")
+
         all_candidates.sort(key=lambda x: x.score, reverse=True)
-        return self._deduplicate(all_candidates)
+        if not all_candidates:
+            if progress_cb:
+                progress_cb(53, "Post-LLM: AI-пул пуст, переключение на эвристику...")
+            return []
+        if progress_cb:
+            progress_cb(53, f"Post-LLM: дедупликация AI-пула ({len(all_candidates)} шт)...")
+        return self._deduplicate(all_candidates, progress_cb=progress_cb, progress_prefix="AI pool dedup")
 
     @staticmethod
     def _build_segment_packets(segments: List, packet_size: int, overlap: int) -> List[Tuple[int, int, List]]:
@@ -542,7 +1002,13 @@ class ShortsProcessor:
 
         return result
 
-    def _build_heuristic_candidates(self, asr_data: ASRData, relaxed: bool = False) -> List[ShortCandidate]:
+    def _build_heuristic_candidates(
+        self,
+        asr_data: ASRData,
+        relaxed: bool = False,
+        progress_cb: Optional[Callable] = None,
+        progress_prefix: str = "Heuristic",
+    ) -> List[ShortCandidate]:
         segments = [s for s in asr_data.segments if s.text and s.text.strip()]
         if not segments:
             return []
@@ -569,7 +1035,13 @@ class ShortsProcessor:
 
         windows: List[ShortCandidate] = []
         n_prepared = len(prepared)
-        if n_prepared > 900:
+        if n_prepared > 12000:
+            start_step = 5
+        elif n_prepared > 7000:
+            start_step = 4
+        elif n_prepared > 3000:
+            start_step = 3
+        elif n_prepared > 900:
             start_step = 2
         else:
             start_step = 1
@@ -577,7 +1049,17 @@ class ShortsProcessor:
         if relaxed:
             start_step = max(1, start_step - 1)
 
+        total_steps = max(1, (n_prepared + start_step - 1) // start_step)
+        step_idx = 0
+        max_outer_steps = 4200 if not relaxed else 2600
         for i in range(0, n_prepared, start_step):
+            step_idx += 1
+            if step_idx > max_outer_steps:
+                if progress_cb:
+                    progress_cb(54, f"{progress_prefix}: safety-stop {step_idx}/{total_steps}")
+                break
+            if progress_cb and (step_idx == 1 or step_idx % 30 == 0):
+                progress_cb(54, f"{progress_prefix}: {step_idx}/{total_steps}")
             start = prepared[i]["seg"].start_time
             text_parts = []
             end = start
@@ -588,10 +1070,11 @@ class ShortsProcessor:
             filler_sum = 0
             prev_end = start
 
+            local_budget = 84 if n_prepared > 10000 else (120 if n_prepared > 4000 else 180)
             for j in range(i, len(prepared)):
                 rec = prepared[j]
                 seg = rec["seg"]
-                if j - i > 180:
+                if j - i > local_budget:
                     break
                 end = seg.end_time
                 text_parts.append(rec["text"])
@@ -944,29 +1427,47 @@ class ShortsProcessor:
             logger.warning(f"LLM rerank skipped: {e}")
             return candidates
 
-    def _deduplicate(self, candidates: List[ShortCandidate]) -> List[ShortCandidate]:
+    def _deduplicate(
+        self,
+        candidates: List[ShortCandidate],
+        progress_cb: Optional[Callable] = None,
+        progress_prefix: str = "Dedup",
+    ) -> List[ShortCandidate]:
         accepted: List[ShortCandidate] = []
+        # Критично для длинных стримов: полный O(n^2) по всем accepted
+        # может зависать после "пакет N/N". Храним предрасчитанные признаки
+        # и сравниваем только с ограниченным числом последних принятых.
+        accepted_meta: List[Tuple[set, set, int, int]] = []  # (tokens, ngrams, bucket, mid)
+        compare_tail = 220
         sim_strong = self.repeat_similarity_threshold
         sim_near = min(0.98, sim_strong + 0.14)
-        for c in candidates:
+        total = max(1, len(candidates))
+        last_emit_idx = -1
+        for idx, c in enumerate(candidates):
+            if progress_cb:
+                # heartbeat, чтобы видеть живой прогресс даже на тяжёлом дедупе
+                step = idx // 25
+                if step != last_emit_idx:
+                    last_emit_idx = step
+                    progress_cb(53, f"{progress_prefix}: {idx + 1}/{total}")
             overlap = False
             c_text = f"{c.title} {c.excerpt}".strip()
             c_tokens = self._token_set(c_text)
             c_ngrams = self._char_ngram_set(c_text)
             c_bucket = int(c.start_ms // 20000)
             c_mid = int((c.start_ms + c.end_ms) / 2)
-            for a in accepted:
+            start_idx = max(0, len(accepted) - compare_tail)
+            for i in range(start_idx, len(accepted)):
+                a = accepted[i]
+                a_tokens, a_ngrams, a_bucket, a_mid = accepted_meta[i]
                 inter = max(0, min(c.end_ms, a.end_ms) - max(c.start_ms, a.start_ms))
                 short = max(1, min(c.duration_ms, a.duration_ms))
                 long = max(1, max(c.duration_ms, a.duration_ms))
                 iou = inter / max(1, (c.duration_ms + a.duration_ms - inter))
                 temporal_close = abs(c.start_ms - a.start_ms) < 3500 or abs(c.end_ms - a.end_ms) < 3500
-                a_text = f"{a.title} {a.excerpt}".strip()
-                a_tokens = self._token_set(a_text)
-                a_ngrams = self._char_ngram_set(a_text)
                 text_sim = max(self._jaccard(c_tokens, a_tokens), self._jaccard(c_ngrams, a_ngrams))
-                mid_close = abs(c_mid - int((a.start_ms + a.end_ms) / 2)) < 18000
-                same_bucket = c_bucket == int(a.start_ms // 20000)
+                mid_close = abs(c_mid - a_mid) < 18000
+                same_bucket = c_bucket == a_bucket
 
                 if inter / short > 0.72:
                     overlap = True
@@ -987,6 +1488,7 @@ class ShortsProcessor:
                     break
             if not overlap:
                 accepted.append(c)
+                accepted_meta.append((c_tokens, c_ngrams, c_bucket, c_mid))
         return accepted
 
     @staticmethod
@@ -1707,10 +2209,22 @@ def render_shorts(
                     continue
                 s = max(clip_start_ms, s - effective_pre_pad_ms)
                 e = min(clip_end_ms, e + effective_post_pad_ms)
-                if e - s >= 180:
+                if e - s >= 60:
                     norm.append((s, e))
             if not norm:
-                return [(clip_start_ms, clip_end_ms)]
+                # В semantic-монтаже НЕ откатываемся в цельный клип.
+                # Пытаемся сохранить хотя бы «сырые» speech ranges без фильтра по длине.
+                for it in raw:
+                    try:
+                        s, e = int(it[0]), int(it[1])
+                    except Exception:
+                        continue
+                    s = max(clip_start_ms, s)
+                    e = min(clip_end_ms, e)
+                    if e > s:
+                        norm.append((s, e))
+            if not norm:
+                return []
             norm.sort(key=lambda x: x[0])
             merged: List[Tuple[int, int]] = [norm[0]]
             for s, e in norm[1:]:
@@ -1747,23 +2261,12 @@ def render_shorts(
             # Раньше тут часто происходил ранний fallback к цельному клипу,
             # из-за чего монтаж почти не делал внутренних вырезов.
             # Теперь разрешаем 2+ диапазона при умеренном покрытии речи.
-            if kept_ratio < speech_min_coverage_ratio and not (
-                len(merged) >= 2 and kept_ratio >= max(0.45, speech_min_coverage_ratio - 0.22)
-            ):
-                return [(clip_start_ms, clip_end_ms)]
-            if len(merged) >= 5 and avg_gap_ms < 190:
-                return [(clip_start_ms, clip_end_ms)]
-
-            # Если есть 2+ диапазона, это уже реальный сигнал для склейки
-            # (даже если суммарная речь короткая).
-            if len(merged) >= 2:
-                return merged
-            if kept_ms < 900:
-                return [(clip_start_ms, clip_end_ms)]
+            # При явном включении trim_non_speech не откатываемся агрессивно
+            # в цельный клип: даже 1+ валидных speech range должны использоваться.
             return merged
 
         candidate_ranges = _normalize_candidate_ranges()
-        has_internal_cuts = not (
+        has_internal_cuts = bool(candidate_ranges) and not (
             len(candidate_ranges) == 1
             and abs(candidate_ranges[0][0] - clip_start_ms) <= 120
             and abs(candidate_ranges[0][1] - clip_end_ms) <= 120

@@ -6,6 +6,7 @@ from app.common.theme_manager import get_theme_palette
 from app.core.task_factory import TaskFactory
 from app.view.auto_shorts_interface import AutoShortsInterface
 from app.view.anti_mate_interface import AntiMateInterface
+from app.view.highlight_reel_interface import HighlightReelInterface
 from app.view.subtitle_interface import SubtitleInterface
 from app.view.task_creation_interface import TaskCreationInterface
 from app.view.transcription_interface import TranscriptionInterface
@@ -35,6 +36,7 @@ class HomeInterface(QWidget):
         self.subtitle_optimization_interface = SubtitleInterface(self)
         self.video_synthesis_interface = VideoSynthesisInterface(self)
         self.auto_shorts_interface = AutoShortsInterface(self)
+        self.highlight_reel_interface = HighlightReelInterface(self)
         self.anti_mate_interface = AntiMateInterface(self)
         self.video_translate_interface = VideoTranslateInterface(self)
 
@@ -42,6 +44,11 @@ class HomeInterface(QWidget):
             self.auto_shorts_interface,
             "AutoShortsInterface",
             "Создание шортсов",
+        )
+        self.addSubInterface(
+            self.highlight_reel_interface,
+            "HighlightReelInterface",
+            "Создание нарезки",
         )
         self.addSubInterface(
             self.video_translate_interface,
@@ -140,6 +147,7 @@ class HomeInterface(QWidget):
         self.subtitle_optimization_interface.close()
         self.video_synthesis_interface.close()
         self.auto_shorts_interface.close()
+        self.highlight_reel_interface.close()
         self.anti_mate_interface.close()
         self.video_translate_interface.close()
         super().closeEvent(event)

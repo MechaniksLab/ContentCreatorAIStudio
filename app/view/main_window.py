@@ -2,7 +2,7 @@ import os
 import re
 
 import psutil
-from PyQt5.QtCore import QSize, QThread, QUrl, pyqtSignal
+from PyQt5.QtCore import QSize, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QIcon
 from PyQt5.QtWidgets import QApplication, QProgressDialog
 from qfluentwidgets import FluentIcon as FIF
@@ -210,6 +210,26 @@ class MainWindow(FluentWindow):
         if not info.get("has_update"):
             return
 
+        self._show_repo_update_prompt_safely(info)
+
+    def _show_repo_update_prompt_safely(self, info: dict, retry_count: int = 0):
+        """Показывает окно обновления только когда нет конкурирующего модального диалога.
+
+        Это предотвращает зависание сценария, когда в момент показа update-dialog
+        пользователь закрывает QFileDialog (выбор видео) и окно обновления остаётся
+        неактивным/невзаимодействуемым.
+        """
+        active_modal = QApplication.activeModalWidget()
+        if active_modal is not None and active_modal is not self:
+            # Модальный диалог ещё активен (например, QFileDialog) —
+            # откладываем показ обновления до освобождения модального стека.
+            if retry_count < 20:
+                QTimer.singleShot(
+                    250,
+                    lambda: self._show_repo_update_prompt_safely(info, retry_count + 1),
+                )
+            return
+
         latest = info.get("latest") or {}
         message = str(latest.get("message") or "").strip()
         short_sha = str(latest.get("sha") or "")[:8]
@@ -221,6 +241,15 @@ class MainWindow(FluentWindow):
         box = MessageBox("Доступно обновление", text, self)
         box.yesButton.setText("Обновить и перезапустить")
         box.cancelButton.setText("Позже")
+
+        # Явно поднимаем и активируем окно перед exec, чтобы исключить "залипание"
+        # после закрытия системного QFileDialog.
+        try:
+            box.raise_()
+            box.activateWindow()
+        except Exception:
+            pass
+
         if box.exec():
             self._start_apply_update_with_progress()
 

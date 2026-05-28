@@ -398,6 +398,57 @@ class Config(QConfig):
     auto_shorts_use_candidates_cache = ConfigItem(
         "MainWindow", "AutoShortsUseCandidatesCache", True, BoolValidator()
     )
+    auto_shorts_semantic_stitch_enabled = ConfigItem(
+        "MainWindow", "AutoShortsSemanticStitchEnabled", False, BoolValidator()
+    )
+    auto_shorts_semantic_stitch_profile = OptionsConfigItem(
+        "MainWindow",
+        "AutoShortsSemanticStitchProfile",
+        "balanced",
+        OptionsValidator(["soft", "balanced", "strict"]),
+    )
+    auto_shorts_topic_timeline_profile = OptionsConfigItem(
+        "MainWindow",
+        "AutoShortsTopicTimelineProfile",
+        "balanced",
+        OptionsValidator(["soft", "balanced", "strict"]),
+    )
+    auto_shorts_semantic_bridge_max_gap_s = RangeConfigItem(
+        "MainWindow", "AutoShortsSemanticBridgeMaxGapS", 90, RangeValidator(10, 600)
+    )
+    auto_shorts_semantic_llm_interruptions_mode = ConfigItem(
+        "MainWindow", "AutoShortsSemanticLlmInterruptionsMode", False, BoolValidator()
+    )
+    auto_shorts_semantic_coherence_check_enabled = ConfigItem(
+        "MainWindow", "AutoShortsSemanticCoherenceCheckEnabled", False, BoolValidator()
+    )
+    highlight_reel_min_duration_s = RangeConfigItem(
+        "MainWindow", "HighlightReelMinDurationS", 20, RangeValidator(6, 180)
+    )
+    highlight_reel_max_duration_s = RangeConfigItem(
+        "MainWindow", "HighlightReelMaxDurationS", 80, RangeValidator(12, 360)
+    )
+    highlight_reel_min_candidates = RangeConfigItem(
+        "MainWindow", "HighlightReelMinCandidates", 20, RangeValidator(3, 120)
+    )
+    highlight_reel_max_candidates = RangeConfigItem(
+        "MainWindow", "HighlightReelMaxCandidates", 60, RangeValidator(5, 300)
+    )
+    highlight_reel_interest_threshold_percent = RangeConfigItem(
+        "MainWindow", "HighlightReelInterestThresholdPercent", 55, RangeValidator(30, 95)
+    )
+    highlight_reel_head_pad_ms = RangeConfigItem(
+        "MainWindow", "HighlightReelHeadPadMs", 220, RangeValidator(0, 3000)
+    )
+    highlight_reel_tail_pad_ms = RangeConfigItem(
+        "MainWindow", "HighlightReelTailPadMs", 260, RangeValidator(0, 4000)
+    )
+    highlight_reel_boring_profile = OptionsConfigItem(
+        "MainWindow",
+        "HighlightReelBoringProfile",
+        "balanced",
+        OptionsValidator(["soft", "balanced", "strict"]),
+    )
     batch_synthesis_fps_mode = OptionsConfigItem(
         "MainWindow",
         "BatchSynthesisFpsMode",
