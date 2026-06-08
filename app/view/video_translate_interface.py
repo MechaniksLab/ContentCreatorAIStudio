@@ -59,6 +59,7 @@ from app.core.video_translate.rvc_model_registry import (
 from app.thread.video_translate_thread import VideoTranslateThread
 from app.common.config import cfg
 from app.config import PROJECT_ROOT
+from app.view.error_dialogs import show_copyable_error
 
 
 _SPEAKER_ANALYSIS_CACHE = PROJECT_ROOT / "AppData" / "cache" / "video_translate_last_speakers.json"
@@ -1510,68 +1511,19 @@ class VideoTranslateInterface(QWidget):
     ):
         msg = str(message or "").strip() or "Неизвестная ошибка"
         parent_ref = parent_widget or self
-
-        # Clipboard
-        try:
-            QApplication.clipboard().setText(msg)
-        except Exception:
-            pass
-
-        # Persist log
         err_file = PROJECT_ROOT / "AppData" / "logs" / str(log_file_name)
         try:
             err_file.parent.mkdir(parents=True, exist_ok=True)
             err_file.write_text(msg, encoding="utf-8")
         except Exception:
             pass
-
-        InfoBar.error(
+        show_copyable_error(
+            parent_ref,
             title,
-            f"{msg}\n(подробно: {err_file.as_posix()}, текст скопирован в буфер)",
+            msg,
+            f"Файл с последней ошибкой: {err_file}\n\n{msg}",
             duration=duration,
-            position=InfoBarPosition.TOP,
-            parent=parent_ref,
         )
-
-        # Copyable dialog
-        try:
-            dlg = QDialog(parent_ref)
-            dlg.setWindowTitle(title)
-            dlg.resize(980, 520)
-            lay = QVBoxLayout(dlg)
-            txt = QTextEdit(dlg)
-            txt.setReadOnly(True)
-            txt.setPlainText(msg)
-            lay.addWidget(txt)
-            btns = QHBoxLayout()
-            copy_btn = PrimaryPushButton("Скопировать ошибку", dlg)
-            open_log_btn = PushButton("Открыть лог", dlg)
-            close_btn = PushButton("Закрыть", dlg)
-            btns.addWidget(copy_btn)
-            btns.addWidget(open_log_btn)
-            btns.addWidget(close_btn)
-            btns.addStretch(1)
-            lay.addLayout(btns)
-
-            def _copy_err():
-                QApplication.clipboard().setText(txt.toPlainText())
-                InfoBar.success("Скопировано", "Текст ошибки скопирован в буфер", duration=1800, parent=dlg)
-
-            def _open_log():
-                if err_file.exists():
-                    if sys.platform == "win32":
-                        os.startfile(str(err_file))
-                    elif sys.platform == "darwin":
-                        subprocess.run(["open", str(err_file)])
-                    else:
-                        subprocess.run(["xdg-open", str(err_file)])
-
-            copy_btn.clicked.connect(_copy_err)
-            open_log_btn.clicked.connect(_open_log)
-            close_btn.clicked.connect(dlg.accept)
-            dlg.exec_()
-        except Exception:
-            pass
 
     def open_rvc_model_manager(self):
         items = self._model_display_items()

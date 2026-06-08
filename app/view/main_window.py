@@ -95,7 +95,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.settingInterface,
             FIF.SETTING,
-            self.tr("Settings"),
+            "Настройки",
             NavigationItemPosition.BOTTOM,
         )
 

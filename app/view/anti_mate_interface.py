@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QStandardPaths
 from PyQt5.QtWidgets import (
+    QAbstractSpinBox,
     QAbstractItemView,
     QFileDialog,
     QHeaderView,
@@ -171,9 +172,21 @@ class AntiMateInterface(QWidget):
         self._build_stage1_card()
         self._build_stage2_card()
         self._build_timeline_card()
+        self._relax_numeric_inputs()
 
         self.scroll_area.setWidget(self.scroll_widget)
         root.addWidget(self.scroll_area, 1)
+
+    def _relax_numeric_inputs(self):
+        for spin in self.findChildren(QSpinBox):
+            try:
+                spin.setKeyboardTracking(False)
+            except Exception:
+                pass
+            try:
+                spin.setCorrectionMode(QAbstractSpinBox.CorrectToNearestValue)
+            except Exception:
+                pass
 
     def _build_presets_card(self):
         card = CardWidget(self)

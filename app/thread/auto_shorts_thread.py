@@ -64,8 +64,8 @@ class AutoShortsTranscribeThread(QThread):
             source_offset_ms = int(self.range_start_s * 1000) if (self.range_enabled and self.range_end_s > self.range_start_s) else 0
             asr_data = self._load_asr_cache(self.selected_asr_cache_key or cache_key)
             if asr_data is not None:
-                self.progress.emit(8, "ASR кеш: найдено, Whisper пропущен")
-                self.progress.emit(100, "Whisper завершён (из кеша). Можно запускать отбор кандидатов")
+                self.progress.emit(8, "Кэш распознавания найден, повторное распознавание пропущено")
+                self.progress.emit(100, "Распознавание завершено из кэша. Можно запускать отбор кандидатов")
                 self.finished.emit(
                     {
                         "asr_json": asr_data.to_json(),
@@ -92,11 +92,11 @@ class AutoShortsTranscribeThread(QThread):
                 if not video2audio(self.video_path, output=temp_wav):
                     raise RuntimeError("Не удалось извлечь аудио из видео")
 
-            self.progress.emit(15, "Whisper: распознавание речи...")
+            self.progress.emit(15, "Распознавание речи...")
             asr_data = self._transcribe_with_fast_profile(temp_wav, transcribe_task.transcribe_config)
             self._save_asr_cache(cache_key, asr_data)
 
-            self.progress.emit(100, "Whisper завершён. Можно запускать отбор кандидатов")
+            self.progress.emit(100, "Распознавание завершено. Можно запускать отбор кандидатов")
             self.finished.emit(
                 {
                     "asr_json": asr_data.to_json(),
@@ -128,7 +128,7 @@ class AutoShortsTranscribeThread(QThread):
 
         if fw_available and orig_model != TranscribeModelEnum.FASTER_WHISPER:
             try:
-                self.progress.emit(18, "Auto Shorts: быстрый ASR-профиль (FasterWhisper)...")
+                self.progress.emit(18, "Auto Shorts: быстрый профиль распознавания...")
                 config.transcribe_model = TranscribeModelEnum.FASTER_WHISPER
                 config.faster_whisper_one_word = True
                 config.faster_whisper_vad_filter = True
@@ -136,6 +136,10 @@ class AutoShortsTranscribeThread(QThread):
                 return transcribe(wav_path, config, callback=_cb)
             except Exception as e:
                 logger.warning("Fast ASR profile failed, fallback to original model: %s", e)
+                self.progress.emit(
+                    18,
+                    f"Предупреждение: быстрый профиль FasterWhisper не запустился. Использую выбранный режим распознавания. Причина: {e}",
+                )
                 config.transcribe_model = orig_model
 
         return transcribe(wav_path, config, callback=_cb)
@@ -434,7 +438,7 @@ class AutoShortsCandidateThread(QThread):
         try:
             asr_json = self.asr_payload.get("asr_json")
             if not asr_json:
-                raise RuntimeError("Нет данных Whisper. Сначала выполните этап распознавания")
+                raise RuntimeError("Нет данных распознавания. Сначала выполните этап распознавания речи")
 
             llm_cfg = AutoShortsTranscribeThread._resolve_llm_config()
             cache_key = self._build_candidates_cache_key(asr_json, llm_cfg=llm_cfg)
@@ -454,11 +458,11 @@ class AutoShortsCandidateThread(QThread):
                     self.finished.emit(self._sanitize_candidates_for_ui(cached))
                     return
 
-            self.progress.emit(5, "Подготовка данных ASR...")
+            self.progress.emit(5, "Подготовка данных распознавания...")
             asr_data = ASRData.from_json(asr_json)
             source_offset_ms = int(self.asr_payload.get("source_offset_ms", 0) or 0)
 
-            self.progress.emit(15, "LLM/эвристика: отбор интересных кандидатов...")
+            self.progress.emit(15, "Нейросеть/эвристика: отбор интересных кандидатов...")
             processor = ShortsProcessor(
                 min_duration_s=self.min_duration_s,
                 max_duration_s=self.max_duration_s,
@@ -625,6 +629,7 @@ class AutoShortsCandidateThread(QThread):
     @classmethod
     def list_candidate_caches_for_video(cls, video_path: str, asr_fingerprint: str = "") -> List[Dict]:
         out: List[Dict] = []
+        legacy_out: List[Dict] = []
         vhash = AutoShortsTranscribeThread._video_hash(video_path)
         vpath = AutoShortsTranscribeThread._norm_video_path(video_path)
         target_asr_fp = str(asr_fingerprint or "").strip()
@@ -633,16 +638,37 @@ class AutoShortsCandidateThread(QThread):
                 data = json.loads(p.read_text(encoding="utf-8"))
                 cache_hash = str(data.get("video_hash", ""))
                 cache_path = AutoShortsTranscribeThread._norm_video_path(str(data.get("video_path", "") or ""))
-                if cache_hash != vhash and (not cache_path or cache_path != vpath):
+                cache_asr_fp = str(data.get("asr_fingerprint", "") or "").strip()
+                has_binding = bool(cache_hash or cache_path or cache_asr_fp)
+                video_match = bool(cache_hash == vhash or (cache_path and cache_path == vpath))
+                asr_match = bool(target_asr_fp and cache_asr_fp and cache_asr_fp == target_asr_fp)
+                if not video_match and not asr_match:
+                    if not has_binding:
+                        cnt = len(data.get("candidates") or [])
+                        legacy_out.append(
+                            {
+                                "key": p.stem,
+                                "count": int(cnt),
+                                "mtime": int(p.stat().st_mtime),
+                                "asr_match": False,
+                                "video_match": False,
+                            }
+                        )
                     continue
-                if target_asr_fp:
-                    if str(data.get("asr_fingerprint", "")).strip() != target_asr_fp:
-                        continue
                 cnt = len(data.get("candidates") or [])
-                out.append({"key": p.stem, "count": int(cnt), "mtime": int(p.stat().st_mtime)})
+                out.append(
+                    {
+                        "key": p.stem,
+                        "count": int(cnt),
+                        "mtime": int(p.stat().st_mtime),
+                        "asr_match": asr_match,
+                        "video_match": video_match,
+                    }
+                )
             except Exception:
                 continue
-        return out
+        out.sort(key=lambda x: (not bool(x.get("asr_match")), -int(x.get("mtime", 0) or 0)))
+        return out if out else legacy_out
 
 
 class AutoShortsRenderThread(QThread):

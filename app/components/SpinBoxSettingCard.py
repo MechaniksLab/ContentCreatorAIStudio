@@ -35,6 +35,8 @@ class DoubleSpinBoxSettingCard(SettingCard):
         self.spinBox.setMinimumWidth(90)
         self.spinBox.setSingleStep(step)  # 设置步长为0.2
         self.spinBox.setAccelerated(True)
+        self.spinBox.setKeyboardTracking(False)
+        self.spinBox.setCorrectionMode(QAbstractSpinBox.CorrectToNearestValue)
         self.spinBox.setStepType(QAbstractSpinBox.AdaptiveDecimalStepType)
 
         # 添加到布局
@@ -81,6 +83,8 @@ class SpinBoxSettingCard(SettingCard):
         self.spinBox.setRange(minimum, maximum)
         self.spinBox.setMinimumWidth(90)
         self.spinBox.setAccelerated(True)
+        self.spinBox.setKeyboardTracking(False)
+        self.spinBox.setCorrectionMode(QAbstractSpinBox.CorrectToNearestValue)
         self.spinBox.setStepType(QAbstractSpinBox.AdaptiveDecimalStepType)
 
         # 添加到布局

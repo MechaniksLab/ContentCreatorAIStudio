@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QAbstractSpinBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -97,9 +98,21 @@ class HighlightReelInterface(QWidget):
         self._build_analyze_card()
         self._build_candidates_card()
         self._build_render_card()
+        self._relax_numeric_inputs()
 
         self.scroll_area.setWidget(self.scroll_widget)
         root.addWidget(self.scroll_area, 1)
+
+    def _relax_numeric_inputs(self):
+        for spin in self.findChildren(SpinBox):
+            try:
+                spin.setKeyboardTracking(False)
+            except Exception:
+                pass
+            try:
+                spin.setCorrectionMode(QAbstractSpinBox.CorrectToNearestValue)
+            except Exception:
+                pass
 
     def _build_analyze_card(self):
         card = CardWidget(self)

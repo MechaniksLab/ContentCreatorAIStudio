@@ -1,6 +1,6 @@
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
-from qfluentwidgets import SegmentedWidget
+from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from qfluentwidgets import PushButton, SegmentedWidget
 
 from app.common.theme_manager import get_theme_palette
 from app.core.task_factory import TaskFactory
@@ -40,6 +40,12 @@ class HomeInterface(QWidget):
         self.anti_mate_interface = AntiMateInterface(self)
         self.video_translate_interface = VideoTranslateInterface(self)
 
+        top_row = QHBoxLayout()
+        self.system_check_btn = PushButton("Проверить ПК на соответствие требованиям программы", self)
+        self.system_check_btn.clicked.connect(self._run_system_requirements_check)
+        top_row.addWidget(self.system_check_btn)
+        top_row.addStretch(1)
+
         self.addSubInterface(
             self.auto_shorts_interface,
             "AutoShortsInterface",
@@ -78,6 +84,7 @@ class HomeInterface(QWidget):
             "VideoSynthesisInterface",
             "Синтез видео с субтитрами",
         )
+        self.vBoxLayout.addLayout(top_row)
         self.vBoxLayout.addWidget(self.pivot)
         self.vBoxLayout.addWidget(self.stackedWidget)
         self.vBoxLayout.setContentsMargins(30, 10, 30, 30)
@@ -93,6 +100,11 @@ class HomeInterface(QWidget):
         self.subtitle_optimization_interface.finished.connect(
             self.switch_to_video_synthesis
         )
+
+    def _run_system_requirements_check(self):
+        self.stackedWidget.setCurrentWidget(self.auto_shorts_interface)
+        self.pivot.setCurrentItem("AutoShortsInterface")
+        self.auto_shorts_interface._run_system_requirements_check()
 
     def switch_to_transcription(self, file_path):
         # 切换到转录界面

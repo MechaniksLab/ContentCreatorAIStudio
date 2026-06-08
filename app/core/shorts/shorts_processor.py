@@ -118,7 +118,7 @@ class ShortsProcessor:
             llm_candidates = self._build_enterprise_llm_candidates(asr_data, progress_cb=progress_cb)
 
         if progress_cb:
-            progress_cb(53, "Post-LLM: эвристический поиск кандидатов...")
+            progress_cb(53, "После нейроотбора: эвристический поиск кандидатов...")
         heuristic_candidates = self._build_heuristic_candidates(
             asr_data,
             progress_cb=progress_cb,
@@ -130,8 +130,8 @@ class ShortsProcessor:
             candidates = llm_candidates + heuristic_candidates[:260]
             candidates.sort(key=lambda x: x.score, reverse=True)
             if progress_cb:
-                progress_cb(53, "Post-LLM: дедупликация объединённого пула...")
-            candidates = self._deduplicate(candidates, progress_cb=progress_cb, progress_prefix="Post-LLM dedup")
+                progress_cb(53, "После нейроотбора: удаление дублей...")
+            candidates = self._deduplicate(candidates, progress_cb=progress_cb, progress_prefix="Удаление дублей после нейроотбора")
         else:
             candidates = heuristic_candidates
 
@@ -145,7 +145,7 @@ class ShortsProcessor:
                 progress_prefix="Heuristic relaxed",
             )
             if progress_cb:
-                progress_cb(54, "Post-LLM: дедупликация expanded-пула...")
+                progress_cb(54, "После нейроотбора: удаление дублей расширенного списка...")
             candidates = self._deduplicate(
                 (candidates + expanded) if candidates else expanded,
                 progress_cb=progress_cb,
@@ -164,14 +164,14 @@ class ShortsProcessor:
 
         # Pass-2 (precision): локально ужесточаем качество до LLM rerank.
         if progress_cb:
-            progress_cb(58, "Post-LLM: precision pass...")
+            progress_cb(58, "После нейроотбора: точная проверка качества...")
         candidates = self._precision_pass(candidates)
 
         if progress_cb:
-            progress_cb(64, "Post-LLM: LLM rerank...")
+            progress_cb(64, "После нейроотбора: повторная оценка нейросетью...")
         reranked = self._try_llm_rerank(candidates)
         if progress_cb:
-            progress_cb(70, "Post-LLM: diversify timeline...")
+            progress_cb(70, "После нейроотбора: распределение по таймлайну...")
         reranked = self._diversify_by_timeline(reranked)
 
         interested_filtered = self._apply_interest_threshold(reranked)
@@ -196,7 +196,7 @@ class ShortsProcessor:
 
         if self.auto_filter_weak_candidates:
             if progress_cb:
-                progress_cb(76, "Post-LLM: авто-фильтр слабых кандидатов...")
+                progress_cb(76, "После нейроотбора: авто-фильтр слабых кандидатов...")
             weak_filtered = self._auto_filter_weak_candidates(reranked)
             min_safe = max(3, int(self.min_candidates * 0.55))
             if len(weak_filtered) >= min_safe:
@@ -824,6 +824,11 @@ class ShortsProcessor:
                 all_candidates.extend(packet_candidates)
             except Exception as e:
                 logger.warning("Enterprise packet parse failed: %s", e)
+                if progress_cb:
+                    progress_cb(
+                        12 + int((i / max(1, len(packets))) * 36),
+                        f"Предупреждение: нейросеть не обработала пакет {i}/{len(packets)}. Причина: {e}",
+                    )
 
             if progress_cb:
                 p = 12 + int((i / max(1, len(packets))) * 36)
@@ -835,10 +840,10 @@ class ShortsProcessor:
         all_candidates.sort(key=lambda x: x.score, reverse=True)
         if not all_candidates:
             if progress_cb:
-                progress_cb(53, "Post-LLM: AI-пул пуст, переключение на эвристику...")
+                progress_cb(53, "Нейросеть не вернула кандидатов, переключаюсь на эвристику...")
             return []
         if progress_cb:
-            progress_cb(53, f"Post-LLM: дедупликация AI-пула ({len(all_candidates)} шт)...")
+            progress_cb(53, f"Удаление дублей в списке нейросети ({len(all_candidates)} шт)...")
         return self._deduplicate(all_candidates, progress_cb=progress_cb, progress_prefix="AI pool dedup")
 
     @staticmethod
@@ -1675,7 +1680,7 @@ class ShortsProcessor:
             tags.append("цепляющий хук")
         if not tags:
             tags.append("плотная речь")
-        return f"Score {score}: " + ", ".join(tags)
+        return f"Балл {score}: " + ", ".join(tags)
 
 
 def render_shorts(
@@ -2214,15 +2219,15 @@ def render_shorts(
         if include_time_range:
             parts.append(f"{int(start_s)}-{int(end_s)}с")
         if include_quality:
-            parts.append(f"Q{int(round(float(getattr(c, 'quality_score', 0) or 0)))}")
+            parts.append(f"Интерес{int(round(float(getattr(c, 'quality_score', 0) or 0)))}")
         if include_score:
-            parts.append(f"S{int(round(float(getattr(c, 'score', 0) or 0)))}")
+            parts.append(f"Балл{int(round(float(getattr(c, 'score', 0) or 0)))}")
         if include_hook:
-            parts.append(f"H{int(round(float(getattr(c, 'hook_score', 0) or 0)))}")
+            parts.append(f"Зацепка{int(round(float(getattr(c, 'hook_score', 0) or 0)))}")
         if include_grade:
             grade_part = _safe_filename(str(getattr(c, "quality_grade", "") or ""), max_len=16)
             if grade_part:
-                parts.append(grade_part)
+                parts.append(f"Класс{grade_part}")
 
         out_name = _safe_filename("_".join(parts), max_len=160) + ".mp4"
         out_name = _fit_filename_to_path_limit(
@@ -2604,6 +2609,11 @@ def render_shorts(
             if selected_encoder_label != "cpu/libx264":
                 cmd_cpu = cmd_cpu_base + cpu_video_codec_args + mux_args
                 _append_render_debug(f"RETRY_CPU [{out_name}] {' '.join(cmd_cpu)}")
+                if progress_cb:
+                    progress_cb(
+                        min(99, int(((i - 1) / max(1, total)) * 100)),
+                        f"Предупреждение: рендер на видеокарте не прошёл для клипа {i}/{total}. Пробую рендер через процессор.",
+                    )
                 p_cpu = _run_ffmpeg(cmd_cpu, i, duration_s)
                 if p_cpu.returncode == 130:
                     _append_render_debug(f"CANCELLED during RETRY_CPU [{out_name}]")
@@ -2631,6 +2641,11 @@ def render_shorts(
             )
             # Fallback: рендер без монтажного dual-layer, чтобы процесс не стопорился полностью
             if use_dual:
+                if progress_cb:
+                    progress_cb(
+                        min(99, int(((i - 1) / max(1, total)) * 100)),
+                        f"Предупреждение: монтажный шаблон не отрендерился для клипа {i}/{total}. Пробую упрощённый рендер без двухслойного монтажа.",
+                    )
                 simple_cmd = cmd_cpu_base + [
                     "-c:v",
                     "libx264",

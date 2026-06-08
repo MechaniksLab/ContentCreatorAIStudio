@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from typing import Dict, List, Optional
 from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QStandardPaths, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QDialog,
     QFileDialog,
@@ -30,11 +32,12 @@ from qfluentwidgets import Action, BodyLabel, CardWidget, CheckBox, ComboBox, Co
 
 from app.common.config import cfg
 from app.common.theme_manager import get_theme_palette
-from app.config import APPDATA_PATH, BIN_PATH, WORK_PATH
+from app.config import APPDATA_PATH, BIN_PATH, LOG_PATH, WORK_PATH
 from app.core.entities import BatchTaskType, SupportedAudioFormats, SupportedVideoFormats
 from app.core.shorts import ShortCandidate, render_shorts
 from app.core.task_factory import TaskFactory
 from app.core.utils.media_binaries import resolve_project_media_binary
+from app.view.error_dialogs import show_copyable_error
 
 
 class LayerPreviewWidget(QWidget):
@@ -526,6 +529,7 @@ class AutoShortsInterface(QWidget):
         self._selected_candidate_row: int = -1
         self._preview_thread = None
         self._preview_in_progress = False
+        self._last_warning_message = ""
         self._table_fill_timer = QTimer(self)
         self._table_fill_timer.setSingleShot(True)
         self._table_fill_timer.timeout.connect(self._fill_table_chunk)
@@ -535,6 +539,8 @@ class AutoShortsInterface(QWidget):
         self._table_fill_fg = QColor("#FFFFFF")
         self._table_fill_bg_even = QColor("#222222")
         self._table_fill_bg_odd = QColor("#2A2A2A")
+        self._advanced_settings_visible = False
+        self._advanced_setting_widgets: List[QWidget] = []
 
         self._fx_preview_timer = QTimer(self)
         self._fx_preview_timer.setSingleShot(True)
@@ -547,6 +553,41 @@ class AutoShortsInterface(QWidget):
     def _init_ui(self):
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(8)
+
+        self.sticky_header = QWidget(self)
+        self.sticky_header.setObjectName("shortsStickyHeader")
+        sticky_layout = QVBoxLayout(self.sticky_header)
+        sticky_layout.setContentsMargins(10, 10, 10, 0)
+        sticky_layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+
+        self.command_bar = CommandBar(self.sticky_header)
+        self.command_bar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.command_bar.setFixedHeight(40)
+        self.open_file_action = Action(FluentIcon.FOLDER, "Выбрать видео")
+        self.open_file_action.triggered.connect(self._on_file_select)
+        self.command_bar.addAction(self.open_file_action)
+        header_row.addWidget(self.command_bar, 1)
+
+        self.system_check_btn = PushButton("Проверить ПК")
+        self.system_check_btn.setToolTip("Проверить ПК на соответствие требованиям программы")
+        self.system_check_btn.clicked.connect(self._run_system_requirements_check)
+        header_row.addWidget(self.system_check_btn)
+
+        self.advanced_settings_btn = PrimaryPushButton("Расширенные настройки")
+        self.advanced_settings_btn.setObjectName("shortsAdvancedSettingsButton")
+        self.advanced_settings_btn.setCheckable(True)
+        self.advanced_settings_btn.setChecked(False)
+        self.advanced_settings_btn.setMinimumWidth(260)
+        self.advanced_settings_btn.clicked.connect(self._toggle_advanced_settings)
+        header_row.addWidget(self.advanced_settings_btn)
+
+        sticky_layout.addLayout(header_row)
+        root_layout.addWidget(self.sticky_header)
+
         self.scroll_area = ScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -556,14 +597,6 @@ class AutoShortsInterface(QWidget):
         self.main_layout = QVBoxLayout(self.scroll_content)
         self.main_layout.setSpacing(14)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
-
-        self.command_bar = CommandBar(self)
-        self.command_bar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.command_bar.setFixedHeight(40)
-        self.open_file_action = Action(FluentIcon.FOLDER, "Выбрать видео")
-        self.open_file_action.triggered.connect(self._on_file_select)
-        self.command_bar.addAction(self.open_file_action)
-        self.main_layout.addWidget(self.command_bar)
 
         self.video_card = CardWidget(self)
         self.video_card.setObjectName("shortsVideoCard")
@@ -580,8 +613,8 @@ class AutoShortsInterface(QWidget):
         self.stage_card.setObjectName("shortsStageCard")
         stage_layout = QVBoxLayout(self.stage_card)
         stage_layout.addWidget(BodyLabel("Этапы:"))
-        self.stage_1 = QLabel("1) Whisper: разбор речи")
-        self.stage_2 = QLabel("2) LLM: отбор кандидатов")
+        self.stage_1 = QLabel("1) Распознавание речи")
+        self.stage_2 = QLabel("2) Нейросеть: отбор кандидатов")
         self.stage_3 = QLabel("3) Проверка и выбор кандидатов")
         self.stage_4 = QLabel("4) Рендер шортсов")
         for w in [self.stage_1, self.stage_2, self.stage_3, self.stage_4]:
@@ -592,6 +625,14 @@ class AutoShortsInterface(QWidget):
         control_layout = QVBoxLayout(self.control_card)
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(10)
+
+        def _advanced_row(layout: QHBoxLayout | QVBoxLayout) -> QWidget:
+            wrap = QWidget(self)
+            wrap_layout = QVBoxLayout(wrap)
+            wrap_layout.setContentsMargins(0, 0, 0, 0)
+            wrap_layout.addLayout(layout)
+            self._advanced_setting_widgets.append(wrap)
+            return wrap
 
         title_row = QHBoxLayout()
         title_row.addWidget(StrongBodyLabel("Пайплайн генерации (строго по этапам)"))
@@ -614,7 +655,7 @@ class AutoShortsInterface(QWidget):
         control_layout.addLayout(template_actions_top)
 
         template_scope_hint_top = BodyLabel(
-            "Пресет сохраняет: кроп/позиции WEBCAM+GAME, 2-слойный режим, цветокоррекцию, "
+            "Пресет сохраняет: кроп/позиции веб-камеры и основного кадра, 2-слойный режим, цветокоррекцию, "
             "параметры этапов (диапазон, длительность, лимиты кандидатов, анти-дубль, склейку речи) "
             "и настройки рендера. Не сохраняет: выбранные кандидаты и текущий список шортсов."
         )
@@ -627,7 +668,7 @@ class AutoShortsInterface(QWidget):
         stage1_layout.setContentsMargins(12, 12, 12, 12)
         stage1_layout.setSpacing(8)
 
-        stage1_layout.addWidget(StrongBodyLabel("Этап 1: Whisper (распознавание речи)"))
+        stage1_layout.addWidget(StrongBodyLabel("Этап 1: Распознавание речи"))
         stage1_hint = BodyLabel("Применяется на этапе 1: параметры ниже влияют только на распознавание и диапазон анализа.")
         stage1_hint.setWordWrap(True)
         stage1_layout.addWidget(stage1_hint)
@@ -657,10 +698,10 @@ class AutoShortsInterface(QWidget):
         stage1_layout.addWidget(hint)
 
         stage1_actions = QHBoxLayout()
-        self.transcribe_btn = PrimaryPushButton("1) Запустить Whisper")
+        self.transcribe_btn = PrimaryPushButton("1) Распознать речь")
         self.transcribe_btn.clicked.connect(self._start_transcribe)
         self.asr_cache_combo = ComboBox(self)
-        self.asr_cache_combo.addItem("ASR кэш: авто")
+        self.asr_cache_combo.addItem("Кэш распознавания: авто")
         self.asr_cache_combo.currentIndexChanged.connect(self._on_asr_cache_changed)
         self.autonomous_checkbox = CheckBox("Полностью автономно")
         self.run_all_btn = PushButton("Запустить все этапы подряд")
@@ -693,8 +734,8 @@ class AutoShortsInterface(QWidget):
         stage2_layout.setContentsMargins(12, 12, 12, 12)
         stage2_layout.setSpacing(8)
 
-        stage2_layout.addWidget(StrongBodyLabel("Этап 2: Отбор кандидатов (LLM/эвристика)"))
-        self.llm_tokens_hint_label = BodyLabel("Оценка токенов LLM: появится после этапа 1 (Whisper)")
+        stage2_layout.addWidget(StrongBodyLabel("Этап 2: Отбор кандидатов (нейросеть/эвристика)"))
+        self.llm_tokens_hint_label = BodyLabel("Оценка нагрузки нейросети: появится после этапа 1")
         self.llm_tokens_hint_label.setWordWrap(True)
         stage2_layout.addWidget(self.llm_tokens_hint_label)
         stage2_layout.addSpacing(8)
@@ -723,10 +764,12 @@ class AutoShortsInterface(QWidget):
         stage2_layout.addSpacing(6)
         tune_title = StrongBodyLabel("Тонкая настройка монтажа")
         stage2_layout.addWidget(tune_title)
+        self._advanced_setting_widgets.append(tune_title)
 
         anti_repeat_title = BodyLabel("1) Повторы и разнообразие")
         anti_repeat_title.setToolTip("Группа фильтров, которые уменьшают повторы и повышают разнообразие найденных моментов")
         stage2_layout.addWidget(anti_repeat_title)
+        self._advanced_setting_widgets.append(anti_repeat_title)
 
         anti_repeat_row = QHBoxLayout()
         repeat_similarity_label = BodyLabel("Анти-дубль (%):")
@@ -747,7 +790,7 @@ class AutoShortsInterface(QWidget):
         )
         anti_repeat_row.addWidget(self.repeat_similarity_spin)
         anti_repeat_row.addStretch(1)
-        stage2_layout.addLayout(anti_repeat_row)
+        stage2_layout.addWidget(_advanced_row(anti_repeat_row))
 
         candidates_limit_title = BodyLabel("1.1) Количество кандидатов")
         candidates_limit_title.setToolTip("Ограничение числа найденных фрагментов после этапа отбора")
@@ -778,38 +821,43 @@ class AutoShortsInterface(QWidget):
         candidates_limit_row.addStretch(1)
         stage2_layout.addLayout(candidates_limit_row)
 
-        filter_row = QHBoxLayout()
+        weak_filter_row = QHBoxLayout()
         self.auto_filter_weak_checkbox = CheckBox("Авто-фильтр слабых кандидатов")
         self.auto_filter_weak_checkbox.setChecked(True)
         self.auto_filter_weak_checkbox.setToolTip(
             "Автоматически убирает слабые моменты с низким качеством/хуком и длинными паузами"
         )
-        filter_row.addWidget(self.auto_filter_weak_checkbox)
-        self.cache_candidates_checkbox = CheckBox("Кэшировать кандидатов (без повторного LLM)")
+        weak_filter_row.addWidget(self.auto_filter_weak_checkbox)
+        weak_filter_row.addStretch(1)
+        stage2_layout.addWidget(_advanced_row(weak_filter_row))
+
+        cache_candidates_row = QHBoxLayout()
+        self.cache_candidates_checkbox = CheckBox("Кэшировать кандидатов (без повторного анализа нейросетью)")
         self.cache_candidates_checkbox.setChecked(bool(cfg.get(cfg.auto_shorts_use_candidates_cache)))
         self.cache_candidates_checkbox.setToolTip(
             "Если включено, результаты этапа 2 будут сохраняться и переиспользоваться\n"
-            "при тех же ASR-данных и тех же параметрах отбора."
+            "при тех же данных распознавания и тех же параметрах отбора."
         )
         self.cache_candidates_checkbox.stateChanged.connect(
             lambda _v: cfg.set(cfg.auto_shorts_use_candidates_cache, bool(self.cache_candidates_checkbox.isChecked()))
         )
-        filter_row.addWidget(self.cache_candidates_checkbox)
+        cache_candidates_row.addWidget(self.cache_candidates_checkbox)
         self.candidates_cache_combo = ComboBox(self)
-        self.candidates_cache_combo.addItem("Кандидаты кэш: авто")
-        filter_row.addWidget(self.candidates_cache_combo)
-        filter_row.addStretch(1)
-        stage2_layout.addLayout(filter_row)
+        self.candidates_cache_combo.addItem("Кэш кандидатов: авто")
+        cache_candidates_row.addWidget(self.candidates_cache_combo)
+        cache_candidates_row.addStretch(1)
+        stage2_layout.addLayout(cache_candidates_row)
 
-        semantic_mode_title = BodyLabel("1.3) Цельные тематические шортсы (LLM-режим)")
+        semantic_mode_title = BodyLabel("1.3) Цельные тематические шортсы (режим нейросети)")
         semantic_mode_title.setToolTip("Отдельный режим: нейросеть связывает продолжения темы через оффтоп и удаляет нерелевантные вставки")
         stage2_layout.addWidget(semantic_mode_title)
+        self._advanced_setting_widgets.append(semantic_mode_title)
 
         semantic_row_1 = QHBoxLayout()
         self.semantic_stitch_enabled_checkbox = CheckBox("Включить режим цельных тематических шортсов")
         self.semantic_stitch_enabled_checkbox.setChecked(bool(cfg.get(cfg.auto_shorts_semantic_stitch_enabled)))
         self.semantic_stitch_enabled_checkbox.setToolTip(
-            "Отдельный режим (по галочке): LLM не только ищет моменты,\n"
+            "Отдельный режим (по галочке): нейросеть не только ищет моменты,\n"
             "но и объединяет продолжение темы даже через вставки оффтопа."
         )
         self.semantic_stitch_enabled_checkbox.stateChanged.connect(
@@ -821,14 +869,14 @@ class AutoShortsInterface(QWidget):
         semantic_row_1.addWidget(self.semantic_stitch_enabled_checkbox)
 
         self.semantic_llm_interruptions_mode_checkbox = CheckBox(
-            "LLM: убирать перебивания/оффтоп других людей внутри темы"
+            "Нейросеть: убирать перебивания и оффтоп внутри темы"
         )
         self.semantic_llm_interruptions_mode_checkbox.setChecked(
             bool(cfg.get(cfg.auto_shorts_semantic_llm_interruptions_mode))
         )
         self.semantic_llm_interruptions_mode_checkbox.setToolTip(
             "Работает только в режиме цельных тематических шортсов.\n"
-            "Передаёт LLM более строгую задачу: вырезать перебивания и\n"
+            "Передаёт нейросети более строгую задачу: вырезать перебивания и\n"
             "нерелевантные реплики других участников, сохраняя только тему.\n"
             "Влияет на шаг Topic Timeline (очистка внутри темы) на этапе 2."
         )
@@ -841,13 +889,13 @@ class AutoShortsInterface(QWidget):
         semantic_row_1.addWidget(self.semantic_llm_interruptions_mode_checkbox)
 
         self.semantic_coherence_check_checkbox = CheckBox(
-            "Проверять связность темы после склейки (LLM)",
+            "Проверять связность темы после склейки нейросетью",
         )
         self.semantic_coherence_check_checkbox.setChecked(
             bool(cfg.get(cfg.auto_shorts_semantic_coherence_check_enabled))
         )
         self.semantic_coherence_check_checkbox.setToolTip(
-            "Дополнительная проверка после semantic-склейки: LLM подтверждает,\n"
+            "Дополнительная проверка после тематической склейки: нейросеть подтверждает,\n"
             "что в шортсе сохранён связный ход темы (начало → развитие → продолжение)."
         )
         self.semantic_coherence_check_checkbox.stateChanged.connect(
@@ -858,7 +906,7 @@ class AutoShortsInterface(QWidget):
         )
         semantic_row_1.addWidget(self.semantic_coherence_check_checkbox)
         semantic_row_1.addStretch(1)
-        stage2_layout.addLayout(semantic_row_1)
+        stage2_layout.addWidget(_advanced_row(semantic_row_1))
 
         semantic_llm_mode_hint = BodyLabel(
             "ℹ Эта галочка влияет только на Topic Timeline (этап 2)\n"
@@ -867,6 +915,7 @@ class AutoShortsInterface(QWidget):
         semantic_llm_mode_hint.setObjectName("semanticLlmHintLabel")
         semantic_llm_mode_hint.setWordWrap(True)
         stage2_layout.addWidget(semantic_llm_mode_hint)
+        self._advanced_setting_widgets.append(semantic_llm_mode_hint)
 
         self.semantic_controls_wrap = QWidget(self)
         semantic_row_2 = QHBoxLayout(self.semantic_controls_wrap)
@@ -884,7 +933,7 @@ class AutoShortsInterface(QWidget):
 
         topic_timeline_profile_label = BodyLabel("Профиль topic-clean (внутри темы):")
         topic_timeline_profile_label.setToolTip(
-            "Определяет, насколько строго LLM вырезает оффтоп внутри одного тематического момента."
+            "Определяет, насколько строго нейросеть вырезает оффтоп внутри одного тематического момента."
         )
         semantic_row_2.addWidget(topic_timeline_profile_label)
         self.topic_timeline_profile_combo = ComboBox(self)
@@ -900,7 +949,7 @@ class AutoShortsInterface(QWidget):
         semantic_gap_label.setToolTip(
             "Это НЕ длительность шортса.\n"
             "Это максимум оффтоп-паузы между 2 кусками одной и той же темы,\n"
-            "которые LLM может склеить в один шортс.\n"
+            "которые нейросеть может склеить в один шортс.\n"
             "Если пауза больше — куски считаются разными моментами."
         )
         semantic_row_2.addWidget(semantic_gap_label)
@@ -917,6 +966,7 @@ class AutoShortsInterface(QWidget):
         semantic_row_2.addWidget(self.semantic_bridge_max_gap_spin)
         semantic_row_2.addStretch(1)
         stage2_layout.addWidget(self.semantic_controls_wrap)
+        self._advanced_setting_widgets.append(self.semantic_controls_wrap)
         self._update_semantic_controls_visibility()
 
         filter_profile_row = QHBoxLayout()
@@ -935,14 +985,15 @@ class AutoShortsInterface(QWidget):
         )
         filter_profile_row.addWidget(self.auto_filter_profile_combo)
         filter_profile_row.addStretch(1)
-        stage2_layout.addLayout(filter_profile_row)
+        stage2_layout.addWidget(_advanced_row(filter_profile_row))
 
-        llm_density_title = BodyLabel("1.2) Плотность отбора LLM")
+        llm_density_title = BodyLabel("1.2) Плотность отбора нейросетью")
         llm_density_title.setToolTip("Настройки, которые увеличивают/уменьшают число кандидатов без ослабления анти-дубля")
         stage2_layout.addWidget(llm_density_title)
+        self._advanced_setting_widgets.append(llm_density_title)
 
         llm_density_row = QHBoxLayout()
-        llm_intensity_label = BodyLabel("Интенсивность LLM-поиска:")
+        llm_intensity_label = BodyLabel("Интенсивность поиска нейросетью:")
         llm_intensity_label.setToolTip(
             "1 — экономный режим (крупные пакеты, меньше вариантов).\n"
             "5 — плотный режим (больше пакетов и вариантов на пакет)."
@@ -952,7 +1003,7 @@ class AutoShortsInterface(QWidget):
         self.llm_search_intensity_spin.setRange(1, 5)
         self.llm_search_intensity_spin.setValue(3)
         self.llm_search_intensity_spin.setToolTip(
-            "Управляет количеством анализируемых пакетов и целевым числом кандидатов от LLM"
+            "Управляет количеством анализируемых пакетов и целевым числом кандидатов от нейросети"
         )
         self.llm_search_intensity_spin.valueChanged.connect(lambda _v: self._update_llm_token_estimate())
         llm_density_row.addWidget(self.llm_search_intensity_spin)
@@ -971,7 +1022,7 @@ class AutoShortsInterface(QWidget):
         )
         llm_density_row.addWidget(self.interest_threshold_spin)
         llm_density_row.addStretch(1)
-        stage2_layout.addLayout(llm_density_row)
+        stage2_layout.addWidget(_advanced_row(llm_density_row))
 
         llm_density_hint = BodyLabel(
             "Рекомендуемо для длинных роликов (40–120 мин): интенсивность 4–5, "
@@ -979,6 +1030,7 @@ class AutoShortsInterface(QWidget):
         )
         llm_density_hint.setWordWrap(True)
         stage2_layout.addWidget(llm_density_hint)
+        self._advanced_setting_widgets.append(llm_density_hint)
 
         self.min_candidates_spin.valueChanged.connect(self._on_candidate_limits_changed)
         self.max_candidates_spin.valueChanged.connect(self._on_candidate_limits_changed)
@@ -987,6 +1039,7 @@ class AutoShortsInterface(QWidget):
         anti_cut_title = BodyLabel("2) Границы фраз и паузы (чтобы не резало слова)")
         anti_cut_title.setToolTip("Параметры склейки речи и отступов, чтобы фразы не обрезались на стыках")
         stage2_layout.addWidget(anti_cut_title)
+        self._advanced_setting_widgets.append(anti_cut_title)
 
         tune_row_1 = QHBoxLayout()
 
@@ -1020,7 +1073,7 @@ class AutoShortsInterface(QWidget):
         )
         tune_row_1.addWidget(self.speech_merge_gap_spin)
         tune_row_1.addStretch(1)
-        stage2_layout.addLayout(tune_row_1)
+        stage2_layout.addWidget(_advanced_row(tune_row_1))
 
         tune_row_2 = QHBoxLayout()
         speech_pre_pad_label = BodyLabel("Перед словом (мс):")
@@ -1071,7 +1124,7 @@ class AutoShortsInterface(QWidget):
         )
         tune_row_2.addWidget(self.clip_tail_pad_spin)
         tune_row_2.addStretch(1)
-        stage2_layout.addLayout(tune_row_2)
+        stage2_layout.addWidget(_advanced_row(tune_row_2))
 
         stage2_layout.addSpacing(8)
         stage2_actions = QHBoxLayout()
@@ -1110,7 +1163,7 @@ class AutoShortsInterface(QWidget):
         self.refresh_preview_btn = PushButton("Обновить кадр")
         self.refresh_preview_btn.clicked.connect(self._reload_preview_frame)
         frame_row.addWidget(self.refresh_preview_btn)
-        self.exact_fx_preview_btn = PushButton("Точный FX-кадр (FFmpeg)")
+        self.exact_fx_preview_btn = PushButton("Точный кадр эффектов")
         self.exact_fx_preview_btn.clicked.connect(self._render_exact_fx_preview_frame)
         frame_row.addWidget(self.exact_fx_preview_btn)
         frame_row.addStretch(1)
@@ -1128,30 +1181,30 @@ class AutoShortsInterface(QWidget):
         row_tpl_actions.addStretch(1)
         template_layout.addLayout(row_tpl_actions)
 
-        template_layout.addWidget(BodyLabel("1) На исходном кадре перетяните и растяните области WEBCAM и GAME (кроп)."))
+        template_layout.addWidget(BodyLabel("1) На исходном кадре перетяните и растяните области веб-камеры и основного кадра."))
         source_actions_row = QHBoxLayout()
         source_actions_row.addStretch(1)
-        self.reset_main_area_9x16_btn = PushButton("Сбросить GAME к 9:16")
-        self.reset_main_area_9x16_btn.setToolTip("Сбросить размер основной области GAME (кроп) к соотношению сторон 9:16")
+        self.reset_main_area_9x16_btn = PushButton("Сбросить основной кадр к 9:16")
+        self.reset_main_area_9x16_btn.setToolTip("Сбросить размер основной области к соотношению сторон 9:16")
         self.reset_main_area_9x16_btn.clicked.connect(self._reset_main_area_to_shorts_ratio)
         source_actions_row.addWidget(self.reset_main_area_9x16_btn)
-        self.match_main_area_to_output_ratio_btn = PushButton("Подогнать GAME по 2-й зоне")
+        self.match_main_area_to_output_ratio_btn = PushButton("Подогнать основной кадр по 2-й зоне")
         self.match_main_area_to_output_ratio_btn.setToolTip(
-            "Привести соотношение GAME в 1-й зоне к такому же соотношению GAME во 2-й зоне"
+            "Привести соотношение основного кадра в 1-й зоне к такому же соотношению во 2-й зоне"
         )
         self.match_main_area_to_output_ratio_btn.clicked.connect(self._match_source_game_to_output_game_ratio)
         source_actions_row.addWidget(self.match_main_area_to_output_ratio_btn)
-        self.match_webcam_area_to_output_ratio_btn = PushButton("Подогнать WEBCAM по 2-й зоне")
+        self.match_webcam_area_to_output_ratio_btn = PushButton("Подогнать веб-камеру по 2-й зоне")
         self.match_webcam_area_to_output_ratio_btn.setToolTip(
-            "Привести соотношение WEBCAM в 1-й зоне к такому же соотношению WEBCAM во 2-й зоне"
+            "Привести соотношение веб-камеры в 1-й зоне к такому же соотношению во 2-й зоне"
         )
         self.match_webcam_area_to_output_ratio_btn.clicked.connect(self._match_source_webcam_to_output_webcam_ratio)
         source_actions_row.addWidget(self.match_webcam_area_to_output_ratio_btn)
         template_layout.addLayout(source_actions_row)
 
         ratio_info_row = QHBoxLayout()
-        self.game_ratio_indicator = BodyLabel("GAME ratio: 1-я зона — / 2-я зона —")
-        self.webcam_ratio_indicator = BodyLabel("WEBCAM ratio: 1-я зона — / 2-я зона —")
+        self.game_ratio_indicator = BodyLabel("Основной кадр: 1-я зона - / 2-я зона -")
+        self.webcam_ratio_indicator = BodyLabel("Веб-камера: 1-я зона - / 2-я зона -")
         ratio_info_row.addWidget(self.game_ratio_indicator)
         ratio_info_row.addSpacing(14)
         ratio_info_row.addWidget(self.webcam_ratio_indicator)
@@ -1186,7 +1239,7 @@ class AutoShortsInterface(QWidget):
         fx_hint.setWordWrap(True)
         template_layout.addWidget(fx_hint)
         fx_exact_hint = BodyLabel(
-            "Кнопка «Точный FX-кадр (FFmpeg)» делает референсный кадр максимально близко к финальному рендеру "
+            "Кнопка «Точный кадр эффектов» делает референсный кадр максимально близко к финальному рендеру "
             "(полезно перед массовым запуском)."
         )
         fx_exact_hint.setWordWrap(True)
@@ -1201,12 +1254,12 @@ class AutoShortsInterface(QWidget):
         fx_title = StrongBodyLabel("Цветокоррекция слоёв")
         fx_title_row.addWidget(fx_title)
         fx_title_row.addStretch(1)
-        self.reset_fx_btn = PushButton("Сбросить FX")
+        self.reset_fx_btn = PushButton("Сбросить эффекты")
         self.reset_fx_btn.clicked.connect(self._reset_fx_controls)
         fx_title_row.addWidget(self.reset_fx_btn)
         template_layout.addLayout(fx_title_row)
 
-        webcam_title = StrongBodyLabel("WEBCAM")
+        webcam_title = StrongBodyLabel("Веб-камера")
         template_layout.addWidget(webcam_title)
 
         self.wc_brightness = SpinBox(self)
@@ -1277,7 +1330,7 @@ class AutoShortsInterface(QWidget):
         webcam_controls_row.addStretch(1)
         template_layout.addLayout(webcam_controls_row)
 
-        game_title = StrongBodyLabel("GAME")
+        game_title = StrongBodyLabel("Основной кадр")
         template_layout.addWidget(game_title)
 
         self.gm_brightness = SpinBox(self)
@@ -1350,13 +1403,13 @@ class AutoShortsInterface(QWidget):
             [
                 "Выбрать",
                 "Таймкод",
-                "Речь-only",
+                "Только речь",
                 "Длит.",
-                "Score",
-                "Q",
-                "Grade",
-                "Hook",
-                "Pause",
+                "Балл",
+                "Интерес",
+                "Класс",
+                "Зацепка",
+                "Паузы",
                 "Заголовок",
                 "Вирусный заголовок",
                 "Почему выбран",
@@ -1418,9 +1471,9 @@ class AutoShortsInterface(QWidget):
             [
                 "По времени (раньше → позже)",
                 "По времени (позже → раньше)",
-                "По интересу (Q ↓)",
-                "По общему score (↓)",
-                "По hook (↓)",
+                "По интересу (↓)",
+                "По общему баллу (↓)",
+                "По зацепке (↓)",
                 "По длительности (длинные сначала)",
                 "По длительности (короткие сначала)",
             ]
@@ -1432,7 +1485,7 @@ class AutoShortsInterface(QWidget):
         )
         sort_row.addWidget(self.render_sort_combo)
         sort_row.addStretch(1)
-        stage4_layout.addLayout(sort_row)
+        stage4_layout.addWidget(_advanced_row(sort_row))
 
         filename_hint = BodyLabel("Что включать в имя файла шортса:")
         filename_hint.setWordWrap(True)
@@ -1454,20 +1507,32 @@ class AutoShortsInterface(QWidget):
         self.filename_include_quality_checkbox.setToolTip(
             "Q = интегральная оценка интересности фрагмента (0..100)."
         )
-        self.filename_include_score_checkbox = CheckBox("Score", self)
+        self.filename_include_score_checkbox = CheckBox("Балл", self)
         self.filename_include_score_checkbox.setChecked(False)
         self.filename_include_score_checkbox.setToolTip(
-            "Score = исходный базовый балл кандидата до финальных quality-правок."
+            "Балл = исходная базовая оценка кандидата до финальных правок интереса."
         )
-        self.filename_include_hook_checkbox = CheckBox("Hook", self)
+        self.filename_include_hook_checkbox = CheckBox("Зацепка", self)
         self.filename_include_hook_checkbox.setChecked(False)
         self.filename_include_hook_checkbox.setToolTip(
-            "Hook = сила захвата внимания в начале фрагмента (0..10)."
+            "Зацепка = сила захвата внимания в начале фрагмента (0..10)."
         )
-        self.filename_include_grade_checkbox = CheckBox("Grade", self)
+        self.filename_include_grade_checkbox = CheckBox("Класс", self)
         self.filename_include_grade_checkbox.setChecked(False)
         self.filename_include_grade_checkbox.setToolTip(
-            "Grade = буквенная категория качества (A/B/C/D)."
+            "Класс = буквенная категория качества (A/B/C/D)."
+        )
+        self.filename_include_quality_checkbox.setText("Интерес")
+        self.filename_include_score_checkbox.setText("Балл")
+        self.filename_include_hook_checkbox.setText("Зацепка")
+        self.filename_include_grade_checkbox.setText("Класс")
+        self._advanced_setting_widgets.extend(
+            [
+                self.filename_include_quality_checkbox,
+                self.filename_include_score_checkbox,
+                self.filename_include_hook_checkbox,
+                self.filename_include_grade_checkbox,
+            ]
         )
         filename_row.addWidget(self.filename_include_title_checkbox)
         filename_row.addWidget(self.filename_include_time_checkbox)
@@ -1504,6 +1569,22 @@ class AutoShortsInterface(QWidget):
         self.render_quality_combo = ComboBox(self)
         self.render_quality_combo.addItems(["Высокое", "Сбалансированное", "Быстрое"])
         self.render_quality_combo.setCurrentIndex(1)
+        self.render_backend_combo.setItemText(0, "Авто")
+        self.render_backend_combo.setItemText(1, "Процессор")
+        self.render_backend_combo.setItemText(2, "Видеокарта")
+        self.render_backend_combo.setItemText(3, "CUDA (NVIDIA)")
+        self._advanced_setting_widgets.extend(
+            [
+                self.render_backend_label,
+                self.render_backend_combo,
+                self.render_fps_label,
+                self.render_fps_combo,
+                self.render_resolution_label,
+                self.render_resolution_combo,
+                self.render_quality_label,
+                self.render_quality_combo,
+            ]
+        )
 
 
         self.render_btn = PrimaryPushButton("Сделать шортсы из выбранных")
@@ -1566,6 +1647,9 @@ class AutoShortsInterface(QWidget):
         stage4_layout.addWidget(self.rendered_card)
         self.main_layout.addWidget(self.stage4_card)
 
+        self._relax_numeric_inputs()
+        self._apply_advanced_settings_visibility()
+
         self.main_layout.addStretch(1)
 
         self.scroll_area.setWidget(self.scroll_content)
@@ -1577,6 +1661,170 @@ class AutoShortsInterface(QWidget):
         # Важный UX-фикс: откладываем загрузку пресета до следующего цикла UI,
         # чтобы старт окна не подвисал на тяжёлой инициализации предпросмотра.
         QTimer.singleShot(0, self._load_initial_template_deferred)
+
+    def _relax_numeric_inputs(self):
+        for spin in self.findChildren(SpinBox):
+            try:
+                spin.setKeyboardTracking(False)
+            except Exception:
+                pass
+            try:
+                spin.setCorrectionMode(QAbstractSpinBox.CorrectToNearestValue)
+            except Exception:
+                pass
+
+    def _toggle_advanced_settings(self):
+        self._advanced_settings_visible = bool(self.advanced_settings_btn.isChecked())
+        self._apply_advanced_settings_visibility()
+
+    def _apply_advanced_settings_visibility(self):
+        visible = bool(getattr(self, "_advanced_settings_visible", False))
+        if hasattr(self, "advanced_settings_btn"):
+            self.advanced_settings_btn.setText(
+                "Скрыть расширенные настройки" if visible else "Расширенные настройки"
+            )
+        for widget in getattr(self, "_advanced_setting_widgets", []):
+            try:
+                widget.setVisible(visible)
+            except Exception:
+                pass
+        try:
+            self._update_semantic_controls_visibility()
+        except Exception:
+            pass
+
+    def _run_system_requirements_check(self):
+        checks = []
+
+        def _add(name: str, ok: bool, status: str, hint: str = "", details: str = ""):
+            checks.append(
+                {
+                    "name": name,
+                    "ok": bool(ok),
+                    "status": status,
+                    "hint": hint,
+                    "details": details,
+                }
+            )
+
+        def _run(cmd: List[str], timeout: int = 8):
+            try:
+                return subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    creationflags=(subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0),
+                )
+            except Exception as e:
+                return e
+
+        ffmpeg = str(resolve_project_media_binary("ffmpeg"))
+        ffprobe = str(resolve_project_media_binary("ffprobe"))
+        for label, path in [("FFmpeg", ffmpeg), ("FFprobe", ffprobe)]:
+            exists = bool(path and Path(path).exists())
+            if exists:
+                proc = _run([path, "-version"])
+                ok = not isinstance(proc, Exception) and proc.returncode == 0
+                detail = str(proc if isinstance(proc, Exception) else (proc.stdout or proc.stderr or "")[:400])
+                _add(label, ok, "Найден и запускается" if ok else "Файл найден, но запуск не прошёл", "Проверьте сборку FFmpeg в resource/bin.", detail)
+            else:
+                _add(label, False, "Не найден", "Положите ffmpeg.exe и ffprobe.exe в resource/bin или переустановите сборку.")
+
+        _add(
+            "Python",
+            True,
+            f"Запущен Python {sys.version.split()[0]}",
+            details=sys.executable,
+        )
+
+        try:
+            WORK_PATH.mkdir(parents=True, exist_ok=True)
+            test_path = WORK_PATH / "__requirements_write_test__.tmp"
+            test_path.write_text("ok", encoding="utf-8")
+            test_path.unlink(missing_ok=True)
+            _add("Папка результатов", True, "Запись доступна", details=str(WORK_PATH))
+        except Exception as e:
+            _add("Папка результатов", False, "Нет доступа к записи", "Проверьте права на папку work-dir.", str(e))
+
+        try:
+            usage = shutil.disk_usage(str(WORK_PATH))
+            free_gb = usage.free / (1024 ** 3)
+            _add(
+                "Свободное место",
+                free_gb >= 5,
+                f"Свободно {free_gb:.1f} ГБ",
+                "Для длинных видео лучше держать хотя бы 10-20 ГБ свободного места.",
+            )
+        except Exception as e:
+            _add("Свободное место", False, "Не удалось проверить", details=str(e))
+
+        faster_whisper_program = str(getattr(cfg, "faster_whisper_program", None).value if hasattr(cfg, "faster_whisper_program") else "")
+        fw_found = bool((faster_whisper_program and Path(faster_whisper_program).exists()) or shutil.which(faster_whisper_program))
+        _add(
+            "FasterWhisper",
+            fw_found,
+            "Настроен" if fw_found else "Не найден в настройках",
+            "Whisper может работать другим способом, но быстрый профиль будет недоступен.",
+            faster_whisper_program,
+        )
+
+        proc = _run([ffmpeg, "-hide_banner", "-encoders"]) if Path(ffmpeg).exists() else None
+        encoders_text = "" if proc is None or isinstance(proc, Exception) else ((proc.stdout or "") + "\n" + (proc.stderr or ""))
+        gpu_ok = any(x in encoders_text for x in ["h264_nvenc", "h264_qsv", "h264_amf"])
+        _add(
+            "Аппаратный рендер",
+            gpu_ok,
+            "Доступен" if gpu_ok else "Не найден",
+            "Если аппаратный рендер недоступен, программа сможет рендерить через процессор.",
+            "Найдены энкодеры: " + ", ".join(x for x in ["h264_nvenc", "h264_qsv", "h264_amf"] if x in encoders_text),
+        )
+
+        llm_base = str(getattr(cfg, "lm_studio_api_base", "").value if hasattr(cfg, "lm_studio_api_base") else "")
+        llm_model = str(getattr(cfg, "lm_studio_model", "").value if hasattr(cfg, "lm_studio_model") else "")
+        _add(
+            "Настройки нейросети",
+            bool(llm_base or llm_model),
+            "Заполнены частично/полностью" if (llm_base or llm_model) else "Не заполнены",
+            "Для отбора нейросетью укажите сервис, адрес и модель в настройках.",
+            f"LM Studio: {llm_base} {llm_model}".strip(),
+        )
+
+        ok_count = sum(1 for c in checks if c["ok"])
+        title = f"Проверка ПК: {ok_count}/{len(checks)} пунктов в порядке"
+        lines = [title, ""]
+        for c in checks:
+            mark = "OK" if c["ok"] else "ПРОБЛЕМА"
+            lines.append(f"[{mark}] {c['name']}: {c['status']}")
+            if c.get("hint"):
+                lines.append(f"Что сделать: {c['hint']}")
+            if c.get("details"):
+                lines.append(f"Детали: {c['details']}")
+            lines.append("")
+
+        self._show_text_report_dialog("Проверка ПК", "\n".join(lines).strip())
+
+    def _show_text_report_dialog(self, title: str, text: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(780, 560)
+        layout = QVBoxLayout(dlg)
+        report = QTextEdit(dlg)
+        report.setReadOnly(True)
+        report.setPlainText(text)
+        layout.addWidget(report)
+        row = QHBoxLayout()
+        copy_btn = PrimaryPushButton("Скопировать отчёт", dlg)
+        close_btn = PushButton("Закрыть", dlg)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text))
+        close_btn.clicked.connect(dlg.accept)
+        row.addStretch(1)
+        row.addWidget(copy_btn)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+        dlg.exec()
 
     def _refresh_template_preset_combo(self, select_path: Optional[Path] = None):
         if not hasattr(self, "template_preset_combo"):
@@ -1895,10 +2143,10 @@ class AutoShortsInterface(QWidget):
         game_status = "✓" if game_match else "≠"
         webcam_status = "✓" if webcam_match else "≠"
         self.game_ratio_indicator.setText(
-            f"GAME ratio: 1-я {self._format_ratio(src_game)} / 2-я {self._format_ratio(out_game)} {game_status}"
+            f"Основной кадр: 1-я {self._format_ratio(src_game)} / 2-я {self._format_ratio(out_game)} {game_status}"
         )
         self.webcam_ratio_indicator.setText(
-            f"WEBCAM ratio: 1-я {self._format_ratio(src_webcam)} / 2-я {self._format_ratio(out_webcam)} {webcam_status}"
+            f"Веб-камера: 1-я {self._format_ratio(src_webcam)} / 2-я {self._format_ratio(out_webcam)} {webcam_status}"
         )
 
     def _on_webcam_area_toggled(self):
@@ -1924,6 +2172,10 @@ class AutoShortsInterface(QWidget):
         self.setStyleSheet(
             f"""
             QWidget#AutoShortsInterface {{ background: {p['window_bg']}; }}
+            QWidget#shortsStickyHeader {{
+                background: {p['window_bg']};
+                border-bottom: 1px solid {p['border']};
+            }}
             QScrollArea {{ border: none; background: transparent; }}
             QScrollArea > QWidget > QWidget {{ background: {p['window_bg']}; }}
             QLabel, BodyLabel, StrongBodyLabel {{ color: {p['text']}; }}
@@ -2034,8 +2286,8 @@ class AutoShortsInterface(QWidget):
         self.candidates_cache_combo.blockSignals(True)
         self.asr_cache_combo.clear()
         self.candidates_cache_combo.clear()
-        self.asr_cache_combo.addItem("ASR кэш: авто", "")
-        self.candidates_cache_combo.addItem("Кандидаты кэш: авто", "")
+        self.asr_cache_combo.addItem("Кэш распознавания: авто", "")
+        self.candidates_cache_combo.addItem("Кэш кандидатов: авто", "")
 
         if self.video_path:
             try:
@@ -2044,7 +2296,7 @@ class AutoShortsInterface(QWidget):
                 for it in asr_items:
                     s = self._fmt_ms_to_hms(int(it.get("start_ms", 0) or 0))
                     e = self._fmt_ms_to_hms(int(it.get("end_ms", 0) or 0))
-                    txt = f"ASR кэш {s}–{e} [{str(it.get('key',''))[:8]}]"
+                    txt = f"Кэш распознавания {s}–{e} [{str(it.get('key',''))[:8]}]"
                     key = str(it.get("key", ""))
                     self.asr_cache_combo.addItem(txt, key)
                     idx_added = self.asr_cache_combo.count() - 1
@@ -2059,13 +2311,18 @@ class AutoShortsInterface(QWidget):
                         self.asr_cache_combo.setCurrentIndex(asr_idx)
 
                 asr_fp = self._current_asr_fingerprint(selected_asr_key)
+                if not asr_fp and asr_items:
+                    asr_fp = self._current_asr_fingerprint(str(asr_items[0].get("key", "") or ""))
                 cand_items = AutoShortsCandidateThread.list_candidate_caches_for_video(
                     self.video_path,
                     asr_fingerprint=asr_fp,
                 )
                 for it in cand_items:
                     cnt = int(it.get("count", 0) or 0)
-                    txt = f"Кандидаты кэш ({cnt}) [{str(it.get('key',''))[:8]}]"
+                    prefix = "Кэш кандидатов"
+                    if it.get("asr_match") and not it.get("video_match"):
+                        prefix = "Кэш кандидатов по тексту"
+                    txt = f"{prefix} ({cnt}) [{str(it.get('key',''))[:8]}]"
                     self.candidates_cache_combo.addItem(txt, str(it.get("key", "")))
 
                 # Аналогично восстанавливаем выбор candidate-кэша.
@@ -2090,19 +2347,26 @@ class AutoShortsInterface(QWidget):
         selected_candidates_key = str(self.candidates_cache_combo.currentData() or "") if hasattr(self, "candidates_cache_combo") else ""
         self.candidates_cache_combo.blockSignals(True)
         self.candidates_cache_combo.clear()
-        self.candidates_cache_combo.addItem("Кандидаты кэш: авто", "")
+        self.candidates_cache_combo.addItem("Кэш кандидатов: авто", "")
         if self.video_path:
             try:
-                from app.thread.auto_shorts_thread import AutoShortsCandidateThread
+                from app.thread.auto_shorts_thread import AutoShortsCandidateThread, AutoShortsTranscribeThread
                 asr_key = str(self.asr_cache_combo.currentData() or "")
                 asr_fp = self._current_asr_fingerprint(asr_key)
+                if not asr_fp:
+                    asr_items = AutoShortsTranscribeThread.list_asr_caches_for_video(self.video_path)
+                    if asr_items:
+                        asr_fp = self._current_asr_fingerprint(str(asr_items[0].get("key", "") or ""))
                 cand_items = AutoShortsCandidateThread.list_candidate_caches_for_video(
                     self.video_path,
                     asr_fingerprint=asr_fp,
                 )
                 for it in cand_items:
                     cnt = int(it.get("count", 0) or 0)
-                    txt = f"Кандидаты кэш ({cnt}) [{str(it.get('key',''))[:8]}]"
+                    prefix = "Кэш кандидатов"
+                    if it.get("asr_match") and not it.get("video_match"):
+                        prefix = "Кэш кандидатов по тексту"
+                    txt = f"{prefix} ({cnt}) [{str(it.get('key',''))[:8]}]"
                     self.candidates_cache_combo.addItem(txt, str(it.get("key", "")))
                 if selected_candidates_key:
                     cand_idx = self.candidates_cache_combo.findData(selected_candidates_key)
@@ -2118,7 +2382,7 @@ class AutoShortsInterface(QWidget):
         try:
             idx = int(self.asr_cache_combo.currentIndex())
             if idx <= 0:
-                return  # "ASR кэш: авто"
+                return  # "Кэш распознавания: авто"
             asr_key = str(self.asr_cache_combo.currentData() or "")
             start_ms = self.asr_cache_combo.itemData(idx, Qt.UserRole + 1)
             end_ms = self.asr_cache_combo.itemData(idx, Qt.UserRole + 2)
@@ -2370,45 +2634,7 @@ class AutoShortsInterface(QWidget):
         return duration
 
     def _show_copyable_error(self, title: str, message: str, details: str = ""):
-        full_text = f"{message}\n\n--- Технические детали ---\n{details or 'нет деталей'}"
-        try:
-            InfoBar.error(
-                title,
-                f"{message}\n(подробности доступны в окне, текст можно скопировать)",
-                duration=8000,
-                position=InfoBarPosition.TOP,
-                parent=self,
-            )
-        except Exception:
-            pass
-
-        try:
-            dlg = QDialog(self)
-            dlg.setWindowTitle(title)
-            dlg.resize(980, 520)
-            lay = QVBoxLayout(dlg)
-            txt = QTextEdit(dlg)
-            txt.setReadOnly(True)
-            txt.setPlainText(full_text)
-            lay.addWidget(txt)
-
-            btns = QHBoxLayout()
-            copy_btn = PrimaryPushButton("Скопировать ошибку", dlg)
-            close_btn = PushButton("Закрыть", dlg)
-            btns.addWidget(copy_btn)
-            btns.addWidget(close_btn)
-            btns.addStretch(1)
-            lay.addLayout(btns)
-
-            def _copy_err():
-                QApplication.clipboard().setText(txt.toPlainText())
-                InfoBar.success("Скопировано", "Текст ошибки скопирован в буфер", duration=1800, parent=dlg)
-
-            copy_btn.clicked.connect(_copy_err)
-            close_btn.clicked.connect(dlg.accept)
-            dlg.exec_()
-        except Exception:
-            pass
+        show_copyable_error(self, title, message, details, log_path=LOG_PATH)
 
     def _start_full_pipeline(self):
         self._autonomous_run = True
@@ -2453,7 +2679,7 @@ class AutoShortsInterface(QWidget):
         self.run_all_btn.setEnabled(False)
         self.render_btn.setEnabled(False)
         self._set_active_progress_stage(1)
-        self._set_stage_progress(0, "Этап 1/4: Whisper...")
+        self._set_stage_progress(0, "Этап 1/4: распознавание речи...")
 
         range_start = int(self.selected_start_s)
         range_end = int(self.selected_end_s)
@@ -2492,11 +2718,11 @@ class AutoShortsInterface(QWidget):
         self.run_all_btn.setEnabled(True)
         self.render_btn.setEnabled(True)
         self._set_stage(2)
-        self._set_stage_progress(100, "Whisper завершён. Запустите этап 2: отбор кандидатов")
+        self._set_stage_progress(100, "Распознавание завершено. Запустите этап 2: отбор кандидатов")
         self._set_active_progress_stage(0)
         InfoBar.success(
             "Этап 1 завершён",
-            "Whisper завершён. Теперь можно запускать LLM-отбор кандидатов.",
+            "Распознавание завершено. Теперь можно запускать отбор кандидатов.",
             duration=3000,
             position=InfoBarPosition.TOP,
             parent=self,
@@ -2514,7 +2740,7 @@ class AutoShortsInterface(QWidget):
         if not self.asr_payload:
             InfoBar.warning(
                 "Внимание",
-                "Сначала выполните этап 1 (Whisper)",
+                "Сначала выполните этап 1: распознавание речи",
                 duration=2500,
                 position=InfoBarPosition.TOP,
                 parent=self,
@@ -2543,7 +2769,7 @@ class AutoShortsInterface(QWidget):
         self.run_all_btn.setEnabled(False)
         self.render_btn.setEnabled(False)
         self._set_active_progress_stage(2)
-        self._set_stage_progress(0, "Этап 2/4: LLM-отбор кандидатов...")
+        self._set_stage_progress(0, "Этап 2/4: отбор кандидатов нейросетью...")
 
         self.candidate_thread = AutoShortsCandidateThread(
             self.asr_payload,
@@ -2738,11 +2964,11 @@ class AutoShortsInterface(QWidget):
             1: "Таймкод начала и конца фрагмента в исходном видео.",
             2: "Если включено — в итоговом рендере внутри кандидата вырезаются неречевые фрагменты.",
             3: "Длительность фрагмента.",
-            4: "Score: базовая оценка кандидата (до финального quality-ранжирования).",
-            5: "Q: итоговая оценка интереса/качества (0..100), основной ориентир для отбора.",
-            6: "Grade: буквенная категория качества (A — лучший, D — слабый).",
-            7: "Hook: сила захвата внимания в начале фрагмента (0..10).",
-            8: "Pause: доля пауз/тишины внутри кандидата (меньше — обычно лучше).",
+            4: "Балл: базовая оценка кандидата до финального ранжирования.",
+            5: "Интерес: итоговая оценка интереса/качества (0..100), основной ориентир для отбора.",
+            6: "Класс: буквенная категория качества (A — лучший, D — слабый).",
+            7: "Зацепка: сила захвата внимания в начале фрагмента (0..10).",
+            8: "Паузы: доля пауз/тишины внутри кандидата (меньше — обычно лучше).",
             9: "Развёрнутый описательный заголовок содержания фрагмента.",
             10: "Краткий вирусный заголовок для YouTube Shorts. В имя файла теперь добавляется ключевая фраза из фрагмента.",
             11: "Почему кандидат был выбран: причина + теги + фрагмент текста.",
@@ -2949,7 +3175,11 @@ class AutoShortsInterface(QWidget):
             pass
 
     def _on_preview_error(self, message: str):
-        InfoBar.error("Предпросмотр", f"Ошибка предпросмотра: {message}", duration=3200, position=InfoBarPosition.TOP, parent=self)
+        self._show_copyable_error(
+            "Ошибка предпросмотра",
+            "Не удалось собрать предпросмотр выбранного шортса.",
+            str(message or "Неизвестная ошибка"),
+        )
 
     def _start_render(self, autonomous: bool = None):
         from app.thread.auto_shorts_thread import AutoShortsRenderThread
@@ -3044,6 +3274,16 @@ class AutoShortsInterface(QWidget):
 
     def _on_progress(self, value: int, message: str):
         self._set_stage_progress(value, message)
+        msg = str(message or "").strip()
+        if msg.startswith("Предупреждение:") and msg != getattr(self, "_last_warning_message", ""):
+            self._last_warning_message = msg
+            InfoBar.warning(
+                "Предупреждение",
+                msg.replace("Предупреждение:", "", 1).strip(),
+                duration=6500,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
 
     def _on_error(self, message: str):
         self.transcribe_btn.setEnabled(True)
@@ -3052,12 +3292,10 @@ class AutoShortsInterface(QWidget):
         self.render_btn.setEnabled(True)
         self.stop_render_btn.setEnabled(False)
         self._autonomous_run = False
-        InfoBar.error(
-            "Ошибка",
-            message,
-            duration=3500,
-            position=InfoBarPosition.TOP,
-            parent=self,
+        self._show_copyable_error(
+            "Ошибка Auto Shorts",
+            "Операция остановлена. Ниже указана причина и технические детали.",
+            str(message or "Неизвестная ошибка"),
         )
 
     def _open_output_folder(self):
@@ -3262,7 +3500,11 @@ class AutoShortsInterface(QWidget):
                 parent=self,
             )
         except Exception as e:
-            InfoBar.error("Ошибка", f"Не удалось сохранить пресет: {e}", duration=3000, parent=self)
+            self._show_copyable_error(
+                "Ошибка сохранения пресета",
+                "Не удалось сохранить или обновить пресет Auto Shorts.",
+                str(e),
+            )
 
     def _save_layout_template_as(self):
         try:
@@ -3283,7 +3525,11 @@ class AutoShortsInterface(QWidget):
             self._save_layout_template()
             self._refresh_template_preset_combo(select_path=self.template_path)
         except Exception as e:
-            InfoBar.error("Ошибка", f"Не удалось сохранить шаблон: {e}", duration=3000, parent=self)
+            self._show_copyable_error(
+                "Ошибка сохранения шаблона",
+                "Не удалось сохранить шаблон монтажа.",
+                str(e),
+            )
 
     def _choose_and_load_layout_template(self):
         try:
@@ -3299,7 +3545,11 @@ class AutoShortsInterface(QWidget):
             self._load_layout_template(Path(file_path), persist_last=True)
             self._refresh_template_preset_combo(select_path=self.template_path)
         except Exception as e:
-            InfoBar.error("Ошибка", f"Не удалось загрузить шаблон: {e}", duration=3000, parent=self)
+            self._show_copyable_error(
+                "Ошибка загрузки шаблона",
+                "Не удалось загрузить шаблон монтажа.",
+                str(e),
+            )
 
     def _load_layout_template(
         self,
@@ -3577,12 +3827,12 @@ class AutoShortsInterface(QWidget):
 
         asr_json = (self.asr_payload or {}).get("asr_json")
         if not asr_json:
-            self.llm_tokens_hint_label.setText("Оценка токенов LLM: появится после этапа 1 (Whisper)")
+            self.llm_tokens_hint_label.setText("Оценка нагрузки нейросети: появится после этапа 1")
             return
 
         segments = self._extract_asr_segments(asr_json)
         if not segments:
-            self.llm_tokens_hint_label.setText("Оценка токенов LLM: не удалось извлечь сегменты из Whisper")
+            self.llm_tokens_hint_label.setText("Оценка нагрузки нейросети: не удалось извлечь фразы из распознавания")
             return
 
         # В реальном пайплайне размер пакетов зависит от "Интенсивности LLM-поиска".
@@ -3636,7 +3886,7 @@ class AutoShortsInterface(QWidget):
         recommended_ctx = int(per_packet_total * 1.2)
 
         self.llm_tokens_hint_label.setText(
-            f"Оценка LLM (приближенно к LM Studio): на 1 пакет вход ~{per_packet_input_tokens}, "
+            f"Оценка нагрузки нейросети (приближенно к LM Studio): на 1 пакет вход ~{per_packet_input_tokens}, "
             f"выход ~{per_packet_output_tokens}, всего ~{per_packet_total}; пакетов: {packets}. "
             f"Суммарно за этап: вход ~{total_input_tokens}, выход ~{total_output_tokens}, всего ~{total_tokens}. "
             f"Рекомендуемый context в LM Studio: от {recommended_ctx} (на один запрос)."
@@ -3695,12 +3945,13 @@ class AutoShortsInterface(QWidget):
 
     def _update_semantic_controls_visibility(self):
         enabled = bool(self.semantic_stitch_enabled_checkbox.isChecked())
+        advanced_visible = bool(getattr(self, "_advanced_settings_visible", True))
         if hasattr(self, "semantic_llm_interruptions_mode_checkbox"):
-            self.semantic_llm_interruptions_mode_checkbox.setVisible(enabled)
+            self.semantic_llm_interruptions_mode_checkbox.setVisible(enabled and advanced_visible)
         if hasattr(self, "semantic_coherence_check_checkbox"):
-            self.semantic_coherence_check_checkbox.setVisible(enabled)
+            self.semantic_coherence_check_checkbox.setVisible(enabled and advanced_visible)
         if hasattr(self, "semantic_controls_wrap"):
-            self.semantic_controls_wrap.setVisible(enabled)
+            self.semantic_controls_wrap.setVisible(enabled and advanced_visible)
 
     @staticmethod
     def _collect_asr_text(asr_json: Dict) -> str:
@@ -4129,12 +4380,10 @@ class AutoShortsInterface(QWidget):
                 parent=self,
             )
         except Exception as e:
-            InfoBar.error(
-                "Ошибка предпросмотра",
-                f"Не удалось построить точный FX-кадр: {e}",
-                duration=3200,
-                position=InfoBarPosition.TOP,
-                parent=self,
+            self._show_copyable_error(
+                "Ошибка точного предпросмотра",
+                "Не удалось построить точный кадр эффектов через FFmpeg.",
+                str(e),
             )
         finally:
             try:
@@ -4191,12 +4440,10 @@ class AutoShortsInterface(QWidget):
             except Exception:
                 batch = None
         if not batch:
-            InfoBar.error(
-                "Ошибка",
-                "Не удалось найти вкладку пакетной обработки",
-                duration=3000,
-                position=InfoBarPosition.TOP,
-                parent=self,
+            self._show_copyable_error(
+                "Ошибка пакетной обработки",
+                "Не удалось найти вкладку пакетной обработки.",
+                "Внутренний объект BatchProcessInterface не найден.",
             )
             return
 
@@ -4213,12 +4460,10 @@ class AutoShortsInterface(QWidget):
                 parent=self,
             )
         except Exception as e:
-            InfoBar.error(
-                "Ошибка",
-                f"Не удалось отправить в пакетную обработку: {e}",
-                duration=3500,
-                position=InfoBarPosition.TOP,
-                parent=self,
+            self._show_copyable_error(
+                "Ошибка пакетной обработки",
+                "Не удалось отправить готовые шортсы в пакетную обработку.",
+                str(e),
             )
 
     def _load_source_preview_frame(self, video_path: str, seek_s: int = 2):
