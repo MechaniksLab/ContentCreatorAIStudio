@@ -1439,10 +1439,10 @@ class AutoShortsInterface(QWidget):
         stage4_layout.addWidget(filename_hint)
 
         filename_row = QHBoxLayout()
-        self.filename_include_title_checkbox = CheckBox("Заголовок", self)
+        self.filename_include_title_checkbox = CheckBox("Ключевая фраза", self)
         self.filename_include_title_checkbox.setChecked(True)
         self.filename_include_title_checkbox.setToolTip(
-            "Добавлять в имя файла краткий вирусный заголовок (YouTube-стиль)."
+            "Добавлять в имя файла фразу из фрагмента, которая стала причиной отбора шортса."
         )
         self.filename_include_time_checkbox = CheckBox("Таймкод", self)
         self.filename_include_time_checkbox.setChecked(True)
@@ -2744,7 +2744,7 @@ class AutoShortsInterface(QWidget):
             7: "Hook: сила захвата внимания в начале фрагмента (0..10).",
             8: "Pause: доля пауз/тишины внутри кандидата (меньше — обычно лучше).",
             9: "Развёрнутый описательный заголовок содержания фрагмента.",
-            10: "Краткий вирусный заголовок для YouTube Shorts (используется и в именах файлов).",
+            10: "Краткий вирусный заголовок для YouTube Shorts. В имя файла теперь добавляется ключевая фраза из фрагмента.",
             11: "Почему кандидат был выбран: причина + теги + фрагмент текста.",
         }
         for idx, tip in tips.items():
@@ -3119,6 +3119,7 @@ class AutoShortsInterface(QWidget):
                 "resolution": (self.render_resolution_combo.currentText() or "1080x1920").strip(),
                 "quality": (self.render_quality_combo.currentText() or "Сбалансированное").strip(),
                 "sort_mode": self._get_render_sort_mode(),
+                "filename_include_key_phrase": bool(self.filename_include_title_checkbox.isChecked()),
                 "filename_include_title": bool(self.filename_include_title_checkbox.isChecked()),
                 "filename_include_time_range": bool(self.filename_include_time_checkbox.isChecked()),
                 "filename_include_quality": bool(self.filename_include_quality_checkbox.isChecked()),
@@ -3155,6 +3156,7 @@ class AutoShortsInterface(QWidget):
                 "semantic_coherence_check_enabled": bool(self.semantic_coherence_check_checkbox.isChecked()),
                 "semantic_bridge_max_gap_s": int(self.semantic_bridge_max_gap_spin.value()),
                 "render_sort_mode": self._get_render_sort_mode(),
+                "filename_include_key_phrase": bool(self.filename_include_title_checkbox.isChecked()),
                 "filename_include_title": bool(self.filename_include_title_checkbox.isChecked()),
                 "filename_include_time_range": bool(self.filename_include_time_checkbox.isChecked()),
                 "filename_include_quality": bool(self.filename_include_quality_checkbox.isChecked()),
@@ -3410,7 +3412,12 @@ class AutoShortsInterface(QWidget):
                     str(render_settings.get("sort_mode", self._get_render_sort_mode()) or self._get_render_sort_mode())
                 )
                 self.filename_include_title_checkbox.setChecked(
-                    bool(render_settings.get("filename_include_title", self.filename_include_title_checkbox.isChecked()))
+                    bool(
+                        render_settings.get(
+                            "filename_include_key_phrase",
+                            render_settings.get("filename_include_title", self.filename_include_title_checkbox.isChecked()),
+                        )
+                    )
                 )
                 self.filename_include_time_checkbox.setChecked(
                     bool(render_settings.get("filename_include_time_range", self.filename_include_time_checkbox.isChecked()))
@@ -3525,7 +3532,12 @@ class AutoShortsInterface(QWidget):
                         str(ui_settings.get("render_sort_mode", self._get_render_sort_mode()) or self._get_render_sort_mode())
                     )
                     self.filename_include_title_checkbox.setChecked(
-                        bool(ui_settings.get("filename_include_title", self.filename_include_title_checkbox.isChecked()))
+                        bool(
+                            ui_settings.get(
+                                "filename_include_key_phrase",
+                                ui_settings.get("filename_include_title", self.filename_include_title_checkbox.isChecked()),
+                            )
+                        )
                     )
                     self.filename_include_time_checkbox.setChecked(
                         bool(ui_settings.get("filename_include_time_range", self.filename_include_time_checkbox.isChecked()))
@@ -4394,6 +4406,7 @@ class AutoShortsInterface(QWidget):
             "speech_merge_gap_ms": int(self.speech_merge_gap_spin.value()),
             "speech_min_coverage_percent": int(self.speech_min_coverage_spin.value()),
             "filename_options": {
+                "include_key_phrase": bool(self.filename_include_title_checkbox.isChecked()),
                 "include_title": bool(self.filename_include_title_checkbox.isChecked()),
                 "include_time_range": bool(self.filename_include_time_checkbox.isChecked()),
                 "include_quality": bool(self.filename_include_quality_checkbox.isChecked()),

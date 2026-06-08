@@ -682,8 +682,16 @@ class AutoShortsRenderThread(QThread):
                     title=str(c.get("title", "")),
                     reason=str(c.get("reason", "")),
                     excerpt=str(c.get("excerpt", "")),
+                    key_phrase=str(c.get("key_phrase", "")),
                     viral_title=str(c.get("viral_title", "")),
                     speech_ranges=c.get("speech_ranges") or [],
+                    speech_density=float(c.get("speech_density", 0.0) or 0.0),
+                    pause_ratio=float(c.get("pause_ratio", 0.0) or 0.0),
+                    hook_score=float(c.get("hook_score", 0.0) or 0.0),
+                    novelty_score=float(c.get("novelty_score", 0.0) or 0.0),
+                    quality_score=float(c.get("quality_score", 0.0) or 0.0),
+                    quality_grade=str(c.get("quality_grade", "") or "C"),
+                    explainability_tags=c.get("explainability_tags") or [],
                 )
                 for c in self.selected_candidates
             ]
@@ -744,8 +752,16 @@ class AutoShortsSinglePreviewThread(QThread):
                 title=str(c.get("title", "") or "preview"),
                 reason=str(c.get("reason", "") or "preview"),
                 excerpt=str(c.get("excerpt", "") or "preview"),
+                key_phrase=str(c.get("key_phrase", "") or ""),
                 viral_title=str(c.get("viral_title", "") or "preview"),
                 speech_ranges=c.get("speech_ranges") or [],
+                speech_density=float(c.get("speech_density", 0.0) or 0.0),
+                pause_ratio=float(c.get("pause_ratio", 0.0) or 0.0),
+                hook_score=float(c.get("hook_score", 0.0) or 0.0),
+                novelty_score=float(c.get("novelty_score", 0.0) or 0.0),
+                quality_score=float(c.get("quality_score", 0.0) or 0.0),
+                quality_grade=str(c.get("quality_grade", "") or "C"),
+                explainability_tags=c.get("explainability_tags") or [],
             )
             files = render_shorts(
                 input_video=self.video_path,

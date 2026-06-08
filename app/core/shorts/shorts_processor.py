@@ -44,6 +44,7 @@ class ShortCandidate:
     title: str
     reason: str
     excerpt: str
+    key_phrase: str = ""
     viral_title: str = ""
     speech_ranges: Optional[List[Tuple[int, int]]] = None
     speech_density: float = 0.0
@@ -986,6 +987,7 @@ class ShortsProcessor:
                         title=str(item.get("title", "")).strip() or self._build_title(excerpt),
                         reason=str(item.get("reason", "")).strip() or "AI Enterprise selection",
                         excerpt=self._shorten(excerpt, 220),
+                        key_phrase=self._build_key_phrase(excerpt),
                         viral_title=self._build_viral_title(str(item.get("title", "")).strip() or excerpt),
                         speech_ranges=speech_ranges,
                         speech_density=round(speech_density, 3),
@@ -1147,6 +1149,7 @@ class ShortsProcessor:
                         title=self._build_title(joined),
                         reason=self._build_reason(joined, score),
                         excerpt=excerpt,
+                        key_phrase=self._build_key_phrase(joined),
                         viral_title=self._build_viral_title(joined),
                         speech_ranges=self._build_speech_ranges_from_segments(
                             [prepared[k]["seg"] for k in range(i, j + 1)]
@@ -1630,6 +1633,37 @@ class ShortsProcessor:
         return ShortsProcessor._shorten(txt, 56)
 
     @staticmethod
+    def _build_key_phrase(text: str) -> str:
+        txt = re.sub(r"\s+", " ", (text or "")).strip()
+        if not txt:
+            return ""
+
+        chunks = [
+            c.strip(" .,!?:;\"'()[]{}")
+            for c in re.split(r"(?<=[.!?…])\s+|\s+[—-]\s+|[,;]\s+", txt)
+            if c and c.strip(" .,!?:;\"'()[]{}")
+        ]
+        if not chunks:
+            chunks = [txt]
+
+        def _score(chunk: str) -> float:
+            words = re.findall(r"[\w\u4e00-\u9fff]+", chunk.lower())
+            if not words:
+                return 0.0
+            length_bonus = 2.0 if 4 <= len(words) <= 12 else 0.0
+            early_bonus = 1.2 if txt.lower().find(chunk.lower()) < 90 else 0.0
+            return ShortsProcessor._estimate_hook_score(chunk) + length_bonus + early_bonus
+
+        best = max(chunks, key=_score)
+        if len(best) < 18 and len(chunks) > 1:
+            idx = chunks.index(best)
+            if idx + 1 < len(chunks):
+                best = f"{best} {chunks[idx + 1]}".strip()
+            elif idx > 0:
+                best = f"{chunks[idx - 1]} {best}".strip()
+        return ShortsProcessor._shorten(best, 72)
+
+    @staticmethod
     def _build_reason(text: str, score: float) -> str:
         t = text.lower()
         tags = []
@@ -1724,7 +1758,7 @@ def render_shorts(
         return f"{short_stem}_{digest}{ext}"
 
     filename_options = render_options.get("filename_options") if isinstance(render_options, dict) else {}
-    include_title = bool(filename_options.get("include_title", True))
+    include_key_phrase = bool(filename_options.get("include_key_phrase", filename_options.get("include_title", True)))
     include_time_range = bool(filename_options.get("include_time_range", True))
     include_quality = bool(filename_options.get("include_quality", False))
     include_score = bool(filename_options.get("include_score", False))
@@ -1736,6 +1770,16 @@ def render_shorts(
         render_options.get("future_prefix_reserve", "субт_") if isinstance(render_options, dict) else "субт_"
     )
     max_filename_len_safe = max(64, 180 - len(reserved_future_prefix))
+
+    def _candidate_filename_phrase(candidate: ShortCandidate) -> str:
+        phrase = str(getattr(candidate, "key_phrase", "") or "").strip()
+        if not phrase:
+            phrase = ShortsProcessor._build_key_phrase(str(getattr(candidate, "excerpt", "") or ""))
+        if not phrase:
+            phrase = str(getattr(candidate, "title", "") or "").strip()
+        if not phrase:
+            phrase = str(getattr(candidate, "viral_title", "") or "").strip()
+        return phrase or "short"
 
     def _safe_int(v, default=0):
         try:
@@ -2161,9 +2205,9 @@ def render_shorts(
         clip_end_ms = int(round(end_s * 1000.0))
         parts: List[str] = ["шорт", f"{i:03d}"]
 
-        if include_title:
+        if include_key_phrase:
             title_part = _safe_filename(
-                getattr(c, "viral_title", "") or c.title or c.excerpt or "short",
+                _candidate_filename_phrase(c),
                 max_len=72,
             )
             parts.append(title_part)
